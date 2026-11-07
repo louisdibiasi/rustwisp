@@ -5,6 +5,7 @@
 
 pub mod base64;
 mod error;
+pub mod http;
 pub mod sha1;
 pub mod simd;
 pub mod webkey;

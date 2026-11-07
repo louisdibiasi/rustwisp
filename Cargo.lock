@@ -3,5 +3,9 @@
 version = 4
 
 [[package]]
+name = "holywisp-config"
+version = "0.1.0"
+
+[[package]]
 name = "holywisp-proto"
 version = "0.1.0"
