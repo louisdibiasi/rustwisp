@@ -86,6 +86,20 @@ fn source_key(ip: &str) -> String {
     }
 }
 
+/// Make room in a full table: look at a bounded sample and drop its lowest, stalest record. The
+/// scan is O(sample), so a flood of new keys cannot turn every insert into a full pass.
+fn evict_sampled(map: &mut HashMap<String, Entry>) {
+    const SAMPLE: usize = 64;
+    let victim = map
+        .iter()
+        .take(SAMPLE)
+        .min_by_key(|(_, e)| (e.score, e.last_seen))
+        .map(|(k, _)| k.clone());
+    if let Some(k) = victim {
+        map.remove(&k);
+    }
+}
+
 fn wall_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -144,8 +158,13 @@ impl Reputation {
         let weight = self.source_weights[e as usize];
         let mut t = self.tables();
         // A good deed does not start a record, and a full table takes no new keys.
-        if !t.sources.contains_key(&key) && (weight <= 0 || t.sources.len() >= MAX_ENTRIES) {
-            return;
+        if !t.sources.contains_key(&key) {
+            if weight <= 0 {
+                return;
+            }
+            if t.sources.len() >= MAX_ENTRIES {
+                evict_sampled(&mut t.sources);
+            }
         }
         let en = t.sources.entry(key).or_insert_with(|| Entry {
             first_seen: wall_ms(),
@@ -159,10 +178,13 @@ impl Reputation {
     /// `src_ip` raises the destination further the first time a source is seen for it.
     pub fn add_dest(&self, dest: &str, e: Event, src_ip: Option<&str>) {
         let mut t = self.tables();
-        if !t.dests.contains_key(dest)
-            && (self.dest_weights[e as usize] <= 0 || t.dests.len() >= MAX_ENTRIES)
-        {
-            return;
+        if !t.dests.contains_key(dest) {
+            if self.dest_weights[e as usize] <= 0 {
+                return;
+            }
+            if t.dests.len() >= MAX_ENTRIES {
+                evict_sampled(&mut t.dests);
+            }
         }
         let en = t.dests.entry(dest.to_string()).or_insert_with(|| Entry {
             first_seen: wall_ms(),

@@ -7,6 +7,9 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 /// Keys one limiter holds before it purges the expired ones on the spot.
 const MAX_WINDOW_KEYS: usize = 262_144;
+const OVERFLOW_KEY: &str = "{0}overflow";
+/// The shared bucket for untracked keys admits this many clients worth of events per window.
+const OVERFLOW_FACTOR: u32 = 64;
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -48,8 +51,16 @@ impl Window {
                 map.retain(|_, (start, _)| now_ms.saturating_sub(*start) < window);
             }
             if map.len() >= MAX_WINDOW_KEYS {
-                // Still full: do not track this key rather than grow without bound.
-                return true;
+                // Still full: every untracked key shares one overflow bucket, so the table stays
+                // bounded and the aggregate rate of unknown clients is still capped (at a
+                // generous multiple of one client's limit).
+                let limit = self.limit.saturating_mul(OVERFLOW_FACTOR);
+                let e = map.entry(OVERFLOW_KEY.to_string()).or_insert((now_ms, 0));
+                if now_ms.saturating_sub(e.0) >= self.window_ms {
+                    *e = (now_ms, 0);
+                }
+                e.1 = e.1.saturating_add(1);
+                return e.1 <= limit;
             }
         }
         let e = match map.get_mut(key) {

@@ -48,6 +48,8 @@ fn read_to_close(c: &mut Client) -> Vec<u8> {
         match c.sock.read(&mut tmp) {
             Ok(0) => return out,
             Ok(n) => out.extend_from_slice(&tmp[..n]),
+            // Closing with client bytes still unread sends a reset instead of a clean end.
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => return out,
             Err(e) => panic!("expected the connection to be closed: {e}"),
         }
     }
