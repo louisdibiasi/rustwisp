@@ -21,6 +21,10 @@ use crate::sys::{self, EventFlags};
 pub(crate) const RX_SIZE: usize = 256 * 1024;
 /// Largest remote read, chosen to stay inside one loopback MSS-sized segment run.
 pub(crate) const REMOTE_CHUNK: usize = 65_472;
+/// Largest piece moved by one splice once a stream is in bulk mode. Measured on loopback with ten
+/// streams: 64 KiB 2.5 GiB/s, 256 KiB 2.8, 512 KiB 3.3, 1 MiB 3.4-3.6. 512 KiB keeps one frame
+/// well under the pipe size and bounds how long a frame can hold up the others.
+pub(crate) const SPLICE_CHUNK: usize = 512 * 1024;
 const PIPE_SIZE: usize = 1 << 20;
 const MAX_EVENTS: usize = 1024;
 

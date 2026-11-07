@@ -17,7 +17,7 @@ use crate::filter;
 use crate::link::{Link, Reg};
 use crate::stats::Stats;
 use crate::sys::{self, Errno, EventFlags};
-use crate::worker::{Ctx, Entry, REMOTE_CHUNK, SpliceMode, TimerKind};
+use crate::worker::{Ctx, Entry, REMOTE_CHUNK, SPLICE_CHUNK, SpliceMode, TimerKind};
 
 /// Resolved addresses tried per CONNECT.
 const MAX_ADDRS: usize = 8;
@@ -526,7 +526,7 @@ fn read_splice(link: &mut Link, cx: &mut Ctx, s: &mut Stream) {
     let max_payload = (cx.cfg().max_message_size as usize)
         .saturating_sub(5)
         .max(1);
-    let len = REMOTE_CHUNK.min(max_payload);
+    let len = SPLICE_CHUNK.min(max_payload);
     for _ in 0..MAX_READS_PER_EVENT {
         if !read_ok(link, s) {
             return;

@@ -543,3 +543,31 @@ fn numeric_looking_hostnames_cannot_sneak_past_the_direct_ip_switch() {
     }
     h.stop_and_join();
 }
+
+#[test]
+fn spliced_frames_never_exceed_max_message_size() {
+    const TOTAL: usize = 8 * 1024 * 1024;
+    let port = firehose_server(TOTAL);
+    let cfg = holywisp_config::Config {
+        max_message_size: 20_005,
+        ..test_config()
+    };
+    let h = start_with(cfg, SpliceMode::Always);
+    let mut c = Client::v1(h.port());
+    c.tcp(1, port);
+    let mut next = 0usize;
+    while next < TOTAL {
+        let p = c.recv_non_continue();
+        assert_eq!(p.ptype, ptype::DATA);
+        assert!(
+            p.payload.len() <= 20_000,
+            "frame of {} bytes",
+            p.payload.len()
+        );
+        for (i, b) in p.payload.iter().enumerate() {
+            assert_eq!(*b, pattern(next + i));
+        }
+        next += p.payload.len();
+    }
+    h.stop_and_join();
+}
