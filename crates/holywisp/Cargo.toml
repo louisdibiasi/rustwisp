@@ -1,0 +1,23 @@
+[package]
+name = "holywisp"
+description = "Wisp v1/v2 proxy server, a Rust rewrite of holyWisp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "holywisp"
+path = "src/main.rs"
+
+[dependencies]
+holywisp-proto = { path = "../holywisp-proto" }
+holywisp-config = { path = "../holywisp-config" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+rustix = { version = "1", features = ["event", "net", "pipe", "fs", "std", "time"] }
+
+[lints]
+workspace = true
