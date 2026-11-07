@@ -21,3 +21,6 @@ compile_commands.json
 /bench/results/
 __pycache__/
 *.pyc
+
+# Rust
+/target/
