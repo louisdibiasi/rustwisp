@@ -67,6 +67,11 @@ fn key_for(n: u32) -> String {
 impl Client {
     /// Connect and upgrade. `protocol` non-empty asks for Wisp v2.
     pub fn connect(port: u16, protocol: &str) -> Client {
+        Client::connect_with(port, protocol, "")
+    }
+
+    /// Like [`Client::connect`] with extra raw header lines (each ending in CRLF).
+    pub fn connect_with(port: u16, protocol: &str, extra: &str) -> Client {
         let sock = TcpStream::connect(("127.0.0.1", port)).expect("connect");
         sock.set_read_timeout(Some(TIMEOUT)).unwrap();
         sock.set_nodelay(true).unwrap();
@@ -76,7 +81,7 @@ impl Client {
             mask_counter: 1,
         };
         let key = key_for(7);
-        let req = http::upgrade_request("127.0.0.1", port, "/", &key, protocol, "");
+        let req = http::upgrade_request("127.0.0.1", port, "/", &key, protocol, extra);
         c.sock.write_all(req.as_bytes()).unwrap();
         let accept = holywisp_proto::webkey::accept_key(&key);
         loop {

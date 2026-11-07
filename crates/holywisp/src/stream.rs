@@ -14,6 +14,7 @@ use crate::buf::Queue;
 use crate::conn::Conn;
 use crate::egress;
 use crate::filter;
+use crate::limits::SigDet;
 use crate::link::{Link, Reg};
 use crate::stats::Stats;
 use crate::sys::{self, Errno, EventFlags};
@@ -54,6 +55,10 @@ pub(crate) struct Stream {
     pub serial: u32,
     /// The last remote read filled a whole chunk, so more is probably waiting.
     pub bulk: bool,
+    /// Holds one of the in-flight SYN slots.
+    pub syn_held: bool,
+    /// `ip:port` of the first resolved address, the key for per-destination limits.
+    pub dest: String,
 }
 
 fn map_errno(e: Errno) -> u8 {
@@ -120,6 +125,8 @@ fn new_stream(cx: &mut Ctx, conn_tok: u64, id: u32, udp: bool, host: &str, port:
         addr_idx: 0,
         serial: 0,
         bulk: false,
+        syn_held: false,
+        dest: String::new(),
     }
 }
 
@@ -128,6 +135,7 @@ pub(crate) fn close_stream(link: &mut Link, cx: &mut Ctx, s: &mut Stream, reason
         return;
     }
     s.state = SState::Closed;
+    release_syn(cx, s);
     s.fd = None; // closing the descriptor removes it from epoll
     s.reg.forget();
     cx.slab.release(s.reg.token);
@@ -136,6 +144,55 @@ pub(crate) fn close_stream(link: &mut Link, cx: &mut Ctx, s: &mut Stream, reason
     if send {
         link.send_close(cx, s.id, reason);
     }
+}
+
+fn release_syn(cx: &Ctx, s: &mut Stream) {
+    if s.syn_held {
+        cx.sh.in_flight_syns.release();
+        s.syn_held = false;
+    }
+}
+
+/// Record a connect outcome against the SYN-flood signature. Returns true when it matched and the
+/// whole connection was closed.
+fn signature_record(link: &mut Link, cx: &Ctx, s: &Stream, ok: bool) -> bool {
+    let f = &cx.cfg().flood;
+    if !f.enabled || !f.syn_signature_enabled || s.udp {
+        return false;
+    }
+    let d: &mut SigDet = link.sigdets.entry(s.dest.clone()).or_default();
+    d.record(ok, cx.sh.now_ms(), u64::from(f.syn_signature_window_ms));
+    if !d.matches(f.syn_signature_min_samples, f.syn_signature_failed_ratio) {
+        return false;
+    }
+    Stats::inc(&cx.sh.stats.syn_signatures);
+    link.close();
+    true
+}
+
+/// Per-destination rate caps, once the address set is known. Returns false when the stream was
+/// closed.
+fn dest_policy(link: &mut Link, cx: &mut Ctx, s: &mut Stream) -> bool {
+    s.dest = format!("{}:{}", s.addrs[0].ip().to_canonical(), s.port);
+    let now = cx.sh.now_ms();
+    if let Some(w) = cx.sh.per_dest_sec.as_ref()
+        && !w.allow(&s.dest, now)
+    {
+        Stats::inc(&cx.sh.stats.throttled_dest);
+        link.violation(cx);
+        if !link.closing {
+            close_stream(link, cx, s, close::THROTTLED, true);
+        }
+        return false;
+    }
+    if let Some(w) = cx.sh.per_dest_min.as_ref()
+        && !w.allow(&s.dest, now)
+    {
+        Stats::inc(&cx.sh.stats.throttled_dest);
+        close_stream(link, cx, s, close::THROTTLED, true);
+        return false;
+    }
+    true
 }
 
 fn update_events(cx: &Ctx, s: &mut Stream) -> bool {
@@ -211,7 +268,9 @@ fn open_literal(link: &mut Link, cx: &mut Ctx, s: &mut Stream, ip: IpAddr) {
         return;
     }
     s.addrs = vec![SocketAddr::new(ip, s.port)];
-    connect_next(link, cx, s, Errno::HOSTUNREACH);
+    if dest_policy(link, cx, s) {
+        connect_next(link, cx, s, Errno::HOSTUNREACH);
+    }
 }
 
 /// The resolver answered (or failed) for a stream still in `Resolving`.
@@ -252,7 +311,9 @@ pub(crate) fn on_resolved(
         return;
     }
     s.serial = s.serial.wrapping_add(1);
-    connect_next(link, cx, s, Errno::HOSTUNREACH);
+    if dest_policy(link, cx, s) {
+        connect_next(link, cx, s, Errno::HOSTUNREACH);
+    }
 }
 
 /// Try the next resolved address.
@@ -268,9 +329,23 @@ fn connect_next(link: &mut Link, cx: &mut Ctx, s: &mut Stream, mut last: Errno) 
                 continue;
             }
         };
+        if !s.udp && !s.syn_held {
+            if !cx.sh.in_flight_syns.try_acquire() {
+                Stats::inc(&cx.sh.stats.throttled_syns);
+                link.violation(cx);
+                if !link.closing {
+                    close_stream(link, cx, s, close::THROTTLED, true);
+                }
+                return;
+            }
+            s.syn_held = true;
+        }
         match sys::connect(&fd, &addr) {
             Ok(()) => {
                 s.fd = Some(fd);
+                if signature_record(link, cx, s, true) {
+                    return;
+                }
                 connected(link, cx, s);
                 return;
             }
@@ -288,10 +363,14 @@ fn connect_next(link: &mut Link, cx: &mut Ctx, s: &mut Stream, mut last: Errno) 
             Err(e) => last = e,
         }
     }
+    if signature_record(link, cx, s, false) {
+        return;
+    }
     close_stream(link, cx, s, map_errno(last), true);
 }
 
 fn connected(link: &mut Link, cx: &mut Ctx, s: &mut Stream) {
+    release_syn(cx, s);
     s.state = SState::Open;
     s.serial = s.serial.wrapping_add(1);
     if !s.udp
@@ -324,7 +403,9 @@ pub(crate) fn on_connect_timer(link: &mut Link, cx: &mut Ctx, s: &mut Stream, se
         SState::Connecting => {
             s.fd = None;
             s.reg.forget();
-            connect_next(link, cx, s, Errno::TIMEDOUT);
+            if !signature_record(link, cx, s, false) {
+                connect_next(link, cx, s, Errno::TIMEDOUT);
+            }
         }
         _ => {}
     }
@@ -347,9 +428,15 @@ pub(crate) fn on_event(link: &mut Link, cx: &mut Ctx, s: &mut Stream, flags: Eve
                 Some(e) => {
                     s.fd = None;
                     s.reg.forget();
-                    connect_next(link, cx, s, e);
+                    if !signature_record(link, cx, s, false) {
+                        connect_next(link, cx, s, e);
+                    }
                 }
-                None => connected(link, cx, s),
+                None => {
+                    if !signature_record(link, cx, s, true) {
+                        connected(link, cx, s);
+                    }
+                }
             }
         }
         SState::Open => {

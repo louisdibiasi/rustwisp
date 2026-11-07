@@ -13,6 +13,7 @@ use rustix::event::epoll::Event;
 
 use crate::conn::Conn;
 use crate::dns::{DnsDone, Mailbox, Resolver};
+use crate::limits::{Bandwidth, Semaphore, Window};
 use crate::slab::Slab;
 use crate::stats::Stats;
 use crate::sys::{self, EventFlags};
@@ -45,7 +46,22 @@ pub(crate) struct Shared {
     pub webclient: Vec<u8>,
     pub splice: SpliceMode,
     pub resolver: Resolver,
+    pub started: Instant,
+    pub conn_rate: Option<Window>,
+    pub per_source: Option<Window>,
+    pub per_dest_sec: Option<Window>,
+    pub per_dest_min: Option<Window>,
+    pub in_flight_syns: Semaphore,
+    pub connections: Semaphore,
+    pub bandwidth: Option<Bandwidth>,
     pub stop: std::sync::atomic::AtomicBool,
+}
+
+impl Shared {
+    /// Milliseconds since the server started; the clock every limiter uses.
+    pub(crate) fn now_ms(&self) -> u64 {
+        self.started.elapsed().as_millis() as u64
+    }
 }
 
 #[derive(Debug)]

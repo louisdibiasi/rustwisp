@@ -1,12 +1,14 @@
 //! The client side of a connection: its socket, the write queue toward it, WebSocket framing of
 //! outgoing Wisp packets, and the splice fast path for remote data.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, OwnedFd};
 
 use holywisp_proto::{wisp, ws};
 
 use crate::buf::Queue;
+use crate::limits::SigDet;
 use crate::stats::Stats;
 use crate::sys::{self, Errno, EventFlags};
 use crate::worker::Ctx;
@@ -92,6 +94,12 @@ pub(crate) struct Link {
     pub throttled: bool,
     pub closing: bool,
     pub violations: u32,
+    /// Holds one of the server-wide connection slots.
+    pub conn_slot: bool,
+    /// Per destination, the recent connect outcomes (SYN-flood signature).
+    pub sigdets: HashMap<String, SigDet>,
+    /// A bandwidth charge asked for a pause; the connection schedules it when the event is done.
+    pub pending_throttle_ms: u64,
     pub stream_cap: usize,
     #[allow(dead_code)] // read by the per-IP limits and logs
     pub peer: SocketAddr,
@@ -145,6 +153,31 @@ impl Link {
         if self.reg.set(&cx.ep, &self.fd, want).is_err() {
             self.closing = true;
         }
+    }
+
+    /// Count a flood-protection violation; enough of them close the connection.
+    pub(crate) fn violation(&mut self, cx: &Ctx) {
+        let limit = cx.cfg().flood.ws_close_after_violations;
+        if limit == 0 {
+            return;
+        }
+        self.violations += 1;
+        if self.violations >= limit {
+            Stats::inc(&cx.sh.stats.ws_closed_violations);
+            self.closing = true;
+        }
+    }
+
+    /// Charge `bytes` against the per-IP bandwidth budget.
+    pub(crate) fn charge_bandwidth(&mut self, cx: &Ctx, bytes: usize) {
+        let Some(bw) = cx.sh.bandwidth.as_ref() else {
+            return;
+        };
+        if self.throttled {
+            return;
+        }
+        let wait = bw.charge(&self.ip, bytes, cx.sh.now_ms());
+        self.pending_throttle_ms = self.pending_throttle_ms.max(wait);
     }
 
     /// Mark the connection for teardown; the worker frees it when the current event is done.
@@ -277,6 +310,7 @@ impl Link {
             }
         }
         Stats::add(&cx.sh.stats.bytes_out, data.len() as u64);
+        self.charge_bandwidth(cx, data.len());
     }
 
     fn send_data_frame(&mut self, cx: &Ctx, sid: u32, payload: &[u8]) {
@@ -350,6 +384,7 @@ impl Link {
             return;
         }
         Stats::add(&cx.sh.stats.bytes_out, n as u64);
+        self.charge_bandwidth(cx, n);
         if !self.wbuf.is_empty() {
             self.flush(cx);
         } else {

@@ -11,6 +11,7 @@ use holywisp_config::{Config, LogLevel};
 use holywisp_proto::wisp::HEADER_LEN;
 
 use crate::dns::{Mailbox, Resolver};
+use crate::limits::{Bandwidth, Semaphore, Window};
 use crate::pages;
 use crate::stats::Stats;
 use crate::worker::{Shared, SpliceMode, Worker};
@@ -51,6 +52,10 @@ pub fn ingress_window(cfg: &Config) -> u32 {
     u32::try_from(by_memory)
         .unwrap_or(u32::MAX)
         .min(cfg.buffer_remaining)
+}
+
+fn flood_window(cfg: &Config, limit: u32, window_ms: u64) -> Option<Window> {
+    (cfg.flood.enabled && limit > 0).then(|| Window::new(limit, window_ms))
 }
 
 fn splice_mode() -> SpliceMode {
@@ -97,6 +102,29 @@ impl Server {
             webclient,
             splice,
             resolver,
+            started: std::time::Instant::now(),
+            conn_rate: (cfg.connections_limit_per_ip > 0 && cfg.connection_window_s > 0).then(
+                || {
+                    Window::new(
+                        cfg.connections_limit_per_ip,
+                        u64::from(cfg.connection_window_s) * 1000,
+                    )
+                },
+            ),
+            per_source: flood_window(&cfg, cfg.flood.max_connects_per_source_per_second, 1000),
+            per_dest_sec: flood_window(&cfg, cfg.flood.max_connects_per_dest_per_second, 1000),
+            per_dest_min: flood_window(&cfg, cfg.flood.max_connects_per_dest_per_minute, 60_000),
+            in_flight_syns: Semaphore::new(if cfg.flood.enabled {
+                cfg.flood.max_in_flight_syns
+            } else {
+                0
+            }),
+            connections: Semaphore::new(if cfg.flood.enabled {
+                cfg.flood.max_concurrent_connections
+            } else {
+                0
+            }),
+            bandwidth: Bandwidth::new(u64::from(cfg.bandwidth_limit_kbps) * 1000 / 8),
             stop: std::sync::atomic::AtomicBool::new(false),
             cfg,
         });

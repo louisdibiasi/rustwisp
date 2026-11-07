@@ -14,6 +14,7 @@ use holywisp_proto::{ProtoError, http, simd, ws};
 
 use crate::buf::Queue;
 use crate::dns::DnsDone;
+use crate::filter;
 use crate::link::{Link, Reg, State};
 use crate::stats::Stats;
 use crate::stream::{self, SState, Stream};
@@ -78,6 +79,9 @@ impl Conn {
                 throttled: false,
                 closing: false,
                 violations: 0,
+                conn_slot: false,
+                sigdets: HashMap::new(),
+                pending_throttle_ms: 0,
                 stream_cap,
                 peer,
                 ip,
@@ -107,12 +111,31 @@ impl Conn {
             stream::close_stream(link, cx, s, close::UNKNOWN, false);
         }
         self.streams.clear();
+        if self.link.conn_slot {
+            cx.sh.connections.release();
+            self.link.conn_slot = false;
+        }
         Stats::dec(&cx.sh.stats.connections_active);
     }
 
     /// Bring stream read interest in line with the connection's pause state.
     pub(crate) fn settle(&mut self, cx: &mut Ctx) {
-        if self.link.closing || self.link.paused == self.applied_paused {
+        if self.link.closing {
+            return;
+        }
+        if self.link.pending_throttle_ms > 0 {
+            let wait = std::mem::take(&mut self.link.pending_throttle_ms);
+            self.link.throttled = true;
+            self.link.sync_interest(cx);
+            cx.add_timer(
+                Duration::from_millis(wait),
+                self.link.reg.token,
+                0,
+                0,
+                TimerKind::Throttle,
+            );
+        }
+        if self.link.paused == self.applied_paused {
             return;
         }
         self.applied_paused = self.link.paused;
@@ -176,7 +199,10 @@ impl Conn {
                     self.streams.remove(&sid);
                 }
             }
-            TimerKind::Throttle => {}
+            TimerKind::Throttle => {
+                self.link.throttled = false;
+                self.link.sync_interest(cx);
+            }
         }
     }
 
@@ -304,6 +330,36 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
             self.plain_reply(cx, &req);
             return used;
         }
+        self.resolve_real_ip(cx, &req);
+        if let Some(rate) = cx.sh.conn_rate.as_ref()
+            && !rate.allow(&self.link.ip, cx.sh.now_ms())
+        {
+            Stats::inc(&cx.sh.stats.refused_connection_rate);
+            let msg = b"rate limit
+";
+            self.http_reply(
+                cx,
+                429,
+                "Too Many Requests",
+                "text/plain; charset=utf-8",
+                msg,
+            );
+            return used;
+        }
+        if !cx.sh.connections.try_acquire() {
+            Stats::inc(&cx.sh.stats.refused_connection_limit);
+            let msg = b"at capacity
+";
+            self.http_reply(
+                cx,
+                503,
+                "Service Unavailable",
+                "text/plain; charset=utf-8",
+                msg,
+            );
+            return used;
+        }
+        self.link.conn_slot = true;
         let v2 = cx.cfg().enable_v2 && !req.ws_protocol.is_empty();
         if cx.cfg().password_required && !v2 {
             let msg = b"wisp-v2 with authentication required\n";
@@ -333,6 +389,21 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
         // Whatever followed the head is frame data.
         let rest = &mut data[used..];
         used + self.process_frames(cx, rest)
+    }
+
+    /// Fill `link.ip` from the trusted-proxy headers when the peer is a trusted proxy.
+    fn resolve_real_ip(&mut self, cx: &Ctx, req: &http::Request) {
+        let c = cx.cfg();
+        if !c.parse_real_ip || c.trusted_proxies.is_empty() {
+            return;
+        }
+        let values: Vec<&str> = c
+            .trusted_headers
+            .iter()
+            .filter_map(|h| req.header(h))
+            .collect();
+        let ip = filter::real_ip(self.link.peer.ip(), &c.trusted_proxies, &values);
+        self.link.ip = ip.to_string();
     }
 
     fn plain_reply(&mut self, cx: &Ctx, req: &http::Request) {
@@ -444,18 +515,6 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
         self.handshake_done(cx);
     }
 
-    fn violation(&mut self, cx: &Ctx) {
-        let limit = cx.cfg().flood.ws_close_after_violations;
-        if limit == 0 {
-            return;
-        }
-        self.link.violations += 1;
-        if self.link.violations >= limit {
-            Stats::inc(&cx.sh.stats.ws_closed_violations);
-            self.link.close();
-        }
-    }
-
     fn handle_connect(&mut self, cx: &mut Ctx, p: &wisp::Packet<'_>) {
         // A CLOSE for stream 0 would end the whole connection, so a CONNECT on it gets no reply.
         if p.stream_id == 0 {
@@ -478,7 +537,7 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
             return;
         }
         if self.link.stream_cap > 0 && self.streams.len() >= self.link.stream_cap {
-            self.violation(cx);
+            self.link.violation(cx);
             self.link.send_close(cx, sid, close::THROTTLED);
             return;
         }
@@ -496,6 +555,17 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
         }
         if req.stream_type != stream_type::TCP && req.stream_type != stream_type::UDP {
             self.link.send_close(cx, sid, close::INVALID_INFO);
+            return;
+        }
+        if let Some(rate) = cx.sh.per_source.as_ref()
+            && !rate.allow(&self.link.ip, cx.sh.now_ms())
+        {
+            Stats::inc(&cx.sh.stats.throttled_source);
+            self.link.violation(cx);
+            if self.link.closing {
+                return;
+            }
+            self.link.send_close(cx, sid, close::THROTTLED);
             return;
         }
         stream::open(self, cx, sid, req.stream_type, host, req.port);
@@ -519,6 +589,7 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
                     return; // raced with our CLOSE
                 };
                 Stats::add(&cx.sh.stats.bytes_in, p.payload.len() as u64);
+                self.link.charge_bandwidth(cx, p.payload.len());
                 stream::on_data(&mut self.link, cx, s, p.payload);
                 if s.state == SState::Closed {
                     self.streams.remove(&p.stream_id);
