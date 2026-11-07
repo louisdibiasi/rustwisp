@@ -210,12 +210,17 @@ fn dest_policy(link: &mut Link, cx: &mut Ctx, s: &mut Stream) -> bool {
         close_stream(link, cx, s, close::THROTTLED, true);
         return false;
     }
-    if let Some(rep) = cx.sh.reputation.as_ref()
-        && rep.tier(rep.dest_score(&s.dest)) == Tier::Strict
-    {
-        link.rep_source(cx, Event::KnownBadDest);
-        close_stream(link, cx, s, close::BLOCKED, true);
-        return false;
+    if let Some(rep) = cx.sh.reputation.as_ref() {
+        // Every resolved address is checked, not just the first.
+        let port = s.port;
+        s.addrs.retain(|a| {
+            rep.dest_tier(&format!("{}:{port}", a.ip().to_canonical())) != Tier::Strict
+        });
+        if s.addrs.is_empty() {
+            link.rep_source(cx, Event::KnownBadDest);
+            close_stream(link, cx, s, close::BLOCKED, true);
+            return false;
+        }
     }
     true
 }

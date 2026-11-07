@@ -22,6 +22,11 @@ const EVENT_COUNT: usize = REPUTATION_EVENTS.len();
 const MAX_STORE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_JSON_DEPTH: usize = 8;
 const MAX_SEEN_SOURCES: usize = 256;
+/// Entries per table. A table at the cap takes no new keys until old ones decay and are evicted.
+const MAX_ENTRIES: usize = 262_144;
+/// A destination needs this many distinct sources before a high score can block it for everyone,
+/// so one client cannot poison a destination on its own.
+const MIN_SOURCES_FOR_STRICT_DEST: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
@@ -66,6 +71,19 @@ pub struct Reputation {
     dest_weights: [i32; EVENT_COUNT],
     distinct_escalation: i32,
     tables: Mutex<Tables>,
+}
+
+/// IPv6 sources are tracked per /64 so rotating addresses inside one network cannot dodge or flood
+/// the table. IPv4 and anything unparseable is used as is.
+fn source_key(ip: &str) -> String {
+    match ip.parse::<std::net::Ipv6Addr>() {
+        Ok(v6) if v6.to_ipv4_mapped().is_none() => {
+            let mut o = v6.octets();
+            o[8..].fill(0);
+            format!("{}/64", std::net::Ipv6Addr::from(o))
+        }
+        _ => ip.to_string(),
+    }
 }
 
 fn wall_ms() -> i64 {
@@ -122,8 +140,14 @@ impl Reputation {
     }
 
     pub fn add_source(&self, ip: &str, e: Event) {
+        let key = source_key(ip);
+        let weight = self.source_weights[e as usize];
         let mut t = self.tables();
-        let en = t.sources.entry(ip.to_string()).or_insert_with(|| Entry {
+        // A good deed does not start a record, and a full table takes no new keys.
+        if !t.sources.contains_key(&key) && (weight <= 0 || t.sources.len() >= MAX_ENTRIES) {
+            return;
+        }
+        let en = t.sources.entry(key).or_insert_with(|| Entry {
             first_seen: wall_ms(),
             ..Entry::default()
         });
@@ -135,6 +159,11 @@ impl Reputation {
     /// `src_ip` raises the destination further the first time a source is seen for it.
     pub fn add_dest(&self, dest: &str, e: Event, src_ip: Option<&str>) {
         let mut t = self.tables();
+        if !t.dests.contains_key(dest)
+            && (self.dest_weights[e as usize] <= 0 || t.dests.len() >= MAX_ENTRIES)
+        {
+            return;
+        }
         let en = t.dests.entry(dest.to_string()).or_insert_with(|| Entry {
             first_seen: wall_ms(),
             ..Entry::default()
@@ -151,11 +180,28 @@ impl Reputation {
     }
 
     pub fn source_score(&self, ip: &str) -> i32 {
-        self.tables().sources.get(ip).map_or(0, |e| e.score)
+        self.tables()
+            .sources
+            .get(&source_key(ip))
+            .map_or(0, |e| e.score)
     }
 
     pub fn dest_score(&self, dest: &str) -> i32 {
         self.tables().dests.get(dest).map_or(0, |e| e.score)
+    }
+
+    /// The tier of a destination: STRICT only once enough distinct sources have been seen for it.
+    pub fn dest_tier(&self, dest: &str) -> Tier {
+        let t = self.tables();
+        let Some(e) = t.dests.get(dest) else {
+            return Tier::Normal;
+        };
+        let tier = self.tier(e.score);
+        if tier == Tier::Strict && e.seen_sources.len() < MIN_SOURCES_FOR_STRICT_DEST {
+            Tier::Throttle
+        } else {
+            tier
+        }
     }
 
     pub fn tier(&self, score: i32) -> Tier {
@@ -616,6 +662,34 @@ mod tests {
         r.add_dest("9.9.9.9:80", Event::BurstRate, Some("1.1.1.1")); // +5
         r.add_dest("9.9.9.9:80", Event::BurstRate, Some("2.2.2.2")); // +5 +1
         assert_eq!(r.dest_score("9.9.9.9:80"), 17);
+    }
+
+    #[test]
+    fn one_source_cannot_make_a_destination_strict_alone() {
+        let r = Reputation::new(&cfg());
+        for _ in 0..40 {
+            r.add_dest("9.9.9.9:80", Event::SynSignature, Some("1.1.1.1"));
+        }
+        assert_eq!(r.dest_score("9.9.9.9:80"), 100);
+        assert_eq!(r.dest_tier("9.9.9.9:80"), Tier::Throttle);
+        r.add_dest("9.9.9.9:80", Event::BurstRate, Some("2.2.2.2"));
+        r.add_dest("9.9.9.9:80", Event::BurstRate, Some("3.3.3.3"));
+        assert_eq!(r.dest_tier("9.9.9.9:80"), Tier::Strict);
+    }
+
+    #[test]
+    fn ipv6_sources_share_a_record_per_slash_64_and_good_deeds_start_none() {
+        let r = Reputation::new(&cfg());
+        r.add_source("2001:db8:1:2::1", Event::BurstRate);
+        r.add_source("2001:db8:1:2:ffff::9", Event::BurstRate);
+        assert_eq!(r.source_score("2001:db8:1:2::77"), 10);
+        assert_eq!(r.source_score("2001:db8:1:3::1"), 0);
+        r.add_source("203.0.113.1", Event::SuccessfulStream);
+        assert_eq!(
+            r.counts().0,
+            1,
+            "a successful stream alone creates no entry"
+        );
     }
 
     #[test]

@@ -19,6 +19,7 @@ pub struct Window {
     limit: u32,
     window_ms: u64,
     entries: Mutex<HashMap<String, (u64, u32)>>,
+    last_purge: Mutex<u64>,
 }
 
 impl Window {
@@ -27,6 +28,7 @@ impl Window {
             limit,
             window_ms: if window_ms == 0 { 1000 } else { window_ms },
             entries: Mutex::new(HashMap::new()),
+            last_purge: Mutex::new(0),
         }
     }
 
@@ -37,9 +39,18 @@ impl Window {
         }
         let mut map = lock(&self.entries);
         if map.len() >= MAX_WINDOW_KEYS && !map.contains_key(key) {
-            // Over capacity: shed the keys whose window has already ended.
-            let window = self.window_ms;
-            map.retain(|_, (start, _)| now_ms.saturating_sub(*start) < window);
+            // Over capacity: shed the keys whose window has ended, at most once a second so a
+            // flood of fresh keys cannot turn every call into a full scan.
+            let mut purge = lock(&self.last_purge);
+            if now_ms.saturating_sub(*purge) >= 1000 {
+                *purge = now_ms;
+                let window = self.window_ms;
+                map.retain(|_, (start, _)| now_ms.saturating_sub(*start) < window);
+            }
+            if map.len() >= MAX_WINDOW_KEYS {
+                // Still full: do not track this key rather than grow without bound.
+                return true;
+            }
         }
         let e = match map.get_mut(key) {
             Some(e) => e,
