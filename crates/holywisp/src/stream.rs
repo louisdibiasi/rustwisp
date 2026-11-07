@@ -16,6 +16,7 @@ use crate::egress;
 use crate::filter;
 use crate::limits::SigDet;
 use crate::link::{Link, Reg};
+use crate::reputation::{Event, Tier};
 use crate::stats::Stats;
 use crate::sys::{self, Errno, EventFlags};
 use crate::worker::{Ctx, Entry, REMOTE_CHUNK, SPLICE_CHUNK, SpliceMode, TimerKind};
@@ -25,6 +26,8 @@ const MAX_ADDRS: usize = 8;
 const MAX_READS_PER_EVENT: usize = 4;
 /// A splice that moves less than this means the remote has gone quiet: back to plain `recv`.
 const BULK_MIN: usize = 16 * 1024;
+/// Destinations whose connect outcomes one connection keeps for the SYN-flood signature.
+const MAX_SIGDETS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SState {
@@ -160,12 +163,25 @@ fn signature_record(link: &mut Link, cx: &Ctx, s: &Stream, ok: bool) -> bool {
     if !f.enabled || !f.syn_signature_enabled || s.udp {
         return false;
     }
+    if link.sigdets.len() >= MAX_SIGDETS && !link.sigdets.contains_key(&s.dest) {
+        // Make room by dropping the destination that has been quiet the longest.
+        let oldest = link
+            .sigdets
+            .iter()
+            .min_by_key(|(_, d)| d.last_seen())
+            .map(|(k, _)| k.clone());
+        if let Some(k) = oldest {
+            link.sigdets.remove(&k);
+        }
+    }
     let d: &mut SigDet = link.sigdets.entry(s.dest.clone()).or_default();
     d.record(ok, cx.sh.now_ms(), u64::from(f.syn_signature_window_ms));
     if !d.matches(f.syn_signature_min_samples, f.syn_signature_failed_ratio) {
         return false;
     }
     Stats::inc(&cx.sh.stats.syn_signatures);
+    link.rep_source(cx, Event::SynSignature);
+    link.rep_dest(cx, &s.dest, Event::SynSignature);
     link.close();
     true
 }
@@ -179,6 +195,8 @@ fn dest_policy(link: &mut Link, cx: &mut Ctx, s: &mut Stream) -> bool {
         && !w.allow(&s.dest, now)
     {
         Stats::inc(&cx.sh.stats.throttled_dest);
+        link.rep_source(cx, Event::BurstRate);
+        link.rep_dest(cx, &s.dest, Event::BurstRate);
         link.violation(cx);
         if !link.closing {
             close_stream(link, cx, s, close::THROTTLED, true);
@@ -190,6 +208,13 @@ fn dest_policy(link: &mut Link, cx: &mut Ctx, s: &mut Stream) -> bool {
     {
         Stats::inc(&cx.sh.stats.throttled_dest);
         close_stream(link, cx, s, close::THROTTLED, true);
+        return false;
+    }
+    if let Some(rep) = cx.sh.reputation.as_ref()
+        && rep.tier(rep.dest_score(&s.dest)) == Tier::Strict
+    {
+        link.rep_source(cx, Event::KnownBadDest);
+        close_stream(link, cx, s, close::BLOCKED, true);
         return false;
     }
     true
@@ -264,6 +289,7 @@ fn open_literal(link: &mut Link, cx: &mut Ctx, s: &mut Stream, ip: IpAddr) {
     }
     if egress::check(cx.cfg(), ip).is_err() {
         Stats::inc(&cx.sh.stats.blocked_egress);
+        link.rep_source(cx, Event::PrivateEgress);
         close_stream(link, cx, s, close::BLOCKED, true);
         return;
     }
@@ -301,6 +327,7 @@ pub(crate) fn on_resolved(
     if s.addrs.is_empty() {
         if any_blocked {
             Stats::inc(&cx.sh.stats.blocked_egress);
+            link.rep_source(cx, Event::PrivateEgress);
         }
         let reason = if any_blocked {
             close::BLOCKED
@@ -371,6 +398,7 @@ fn connect_next(link: &mut Link, cx: &mut Ctx, s: &mut Stream, mut last: Errno) 
 
 fn connected(link: &mut Link, cx: &mut Ctx, s: &mut Stream) {
     release_syn(cx, s);
+    link.rep_source(cx, Event::SuccessfulStream);
     s.state = SState::Open;
     s.serial = s.serial.wrapping_add(1);
     if !s.udp
@@ -379,7 +407,7 @@ fn connected(link: &mut Link, cx: &mut Ctx, s: &mut Stream) {
         let c = cx.cfg();
         sys::tune_tcp(fd, c.tcp_nodelay, c.tcp_quickack, c.socket_buffer_size);
     }
-    s.read_armed = !link.paused;
+    s.read_armed = !link.reads_suspended();
     if !update_events(cx, s) {
         close_stream(link, cx, s, close::NETWORK_ERROR, true);
         return;
@@ -576,7 +604,7 @@ fn read_remote(link: &mut Link, cx: &mut Ctx, s: &mut Stream) {
 }
 
 fn read_ok(link: &Link, s: &Stream) -> bool {
-    s.read_armed && !link.paused && !link.closing && s.state == SState::Open
+    s.read_armed && !link.reads_suspended() && !link.closing && s.state == SState::Open
 }
 
 fn read_copy(link: &mut Link, cx: &mut Ctx, s: &mut Stream) {

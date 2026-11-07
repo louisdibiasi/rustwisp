@@ -14,6 +14,7 @@ use rustix::event::epoll::Event;
 use crate::conn::Conn;
 use crate::dns::{DnsDone, Mailbox, Resolver};
 use crate::limits::{Bandwidth, Semaphore, Window};
+use crate::reputation::Reputation;
 use crate::slab::Slab;
 use crate::stats::Stats;
 use crate::sys::{self, EventFlags};
@@ -54,6 +55,7 @@ pub(crate) struct Shared {
     pub in_flight_syns: Semaphore,
     pub connections: Semaphore,
     pub bandwidth: Option<Bandwidth>,
+    pub reputation: Option<Reputation>,
     pub stop: std::sync::atomic::AtomicBool,
 }
 

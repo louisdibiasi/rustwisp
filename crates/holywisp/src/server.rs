@@ -13,6 +13,7 @@ use holywisp_proto::wisp::HEADER_LEN;
 use crate::dns::{Mailbox, Resolver};
 use crate::limits::{Bandwidth, Semaphore, Window};
 use crate::pages;
+use crate::reputation::Reputation;
 use crate::stats::Stats;
 use crate::worker::{Shared, SpliceMode, Worker};
 
@@ -63,6 +64,66 @@ fn splice_mode() -> SpliceMode {
         Ok("off") => SpliceMode::Off,
         Ok("always") => SpliceMode::Always,
         _ => SpliceMode::Auto,
+    }
+}
+
+/// Slow housekeeping: limiter eviction, DNS cache expiry, reputation decay and saves.
+fn maintenance(sh: &Shared) {
+    let mut last_slow = 0u64;
+    let mut last_save = 0u64;
+    loop {
+        std::thread::park_timeout(Duration::from_secs(1));
+        let stopping = sh.stop.load(Ordering::Acquire);
+        let now = sh.now_ms();
+        if now.saturating_sub(last_slow) >= 60_000 || stopping {
+            last_slow = now;
+            let window_ms = u64::from(sh.cfg.connection_window_s) * 1000;
+            if let Some(w) = sh.conn_rate.as_ref() {
+                w.evict(2 * window_ms + 120_000, now);
+            }
+            for (w, idle) in [
+                (sh.per_source.as_ref(), 120_000),
+                (sh.per_dest_sec.as_ref(), 120_000),
+                (sh.per_dest_min.as_ref(), 7_200_000),
+            ] {
+                if let Some(w) = w {
+                    w.evict(idle, now);
+                }
+            }
+            if let Some(b) = sh.bandwidth.as_ref() {
+                b.evict(600_000, now);
+            }
+            sh.resolver.expire();
+            sh.stats
+                .dns_cache_entries
+                .store(sh.resolver.cache_entries(), Ordering::Relaxed);
+            if let Some(r) = sh.reputation.as_ref() {
+                r.decay(now);
+                r.evict();
+            }
+        }
+        if let Some(r) = sh.reputation.as_ref() {
+            let (sources, dests) = r.counts();
+            sh.stats
+                .reputation_sources
+                .store(sources as u64, Ordering::Relaxed);
+            sh.stats
+                .reputation_dests
+                .store(dests as u64, Ordering::Relaxed);
+            let every = u64::from(sh.cfg.reputation.save_interval_s) * 1000;
+            if every > 0 && (now.saturating_sub(last_save) >= every || stopping) {
+                last_save = now;
+                if let Err(e) = r.save() {
+                    eprintln!(
+                        "holywisp: reputation: save to {}: {e}",
+                        sh.cfg.reputation.store_path
+                    );
+                }
+            }
+        }
+        if stopping {
+            return;
+        }
     }
 }
 
@@ -124,10 +185,21 @@ impl Server {
             } else {
                 0
             }),
+            reputation: cfg
+                .reputation_enabled
+                .then(|| Reputation::new(&cfg.reputation)),
             bandwidth: Bandwidth::new(u64::from(cfg.bandwidth_limit_kbps) * 1000 / 8),
             stop: std::sync::atomic::AtomicBool::new(false),
             cfg,
         });
+        if let Some(r) = shared.reputation.as_ref()
+            && let Err(e) = r.load()
+        {
+            eprintln!(
+                "holywisp: reputation: load from {}: {e}",
+                shared.cfg.reputation.store_path
+            );
+        }
         let mut port = shared.cfg.port;
         let mut workers = Vec::with_capacity(count);
         let mut mailboxes = Vec::with_capacity(count);
@@ -193,16 +265,7 @@ impl Server {
         let maint_shared = Arc::clone(&shared);
         let maint = std::thread::Builder::new()
             .name("hw-maint".into())
-            .spawn(move || {
-                while !maint_shared.stop.load(Ordering::Acquire) {
-                    std::thread::park_timeout(Duration::from_secs(30));
-                    maint_shared.resolver.expire();
-                    maint_shared
-                        .stats
-                        .dns_cache_entries
-                        .store(maint_shared.resolver.cache_entries(), Ordering::Relaxed);
-                }
-            })?;
+            .spawn(move || maintenance(&maint_shared))?;
         let maint_thread = maint.thread().clone();
         threads.push(maint);
         Ok(ServerHandle {

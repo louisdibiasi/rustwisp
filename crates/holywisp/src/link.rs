@@ -9,6 +9,7 @@ use holywisp_proto::{wisp, ws};
 
 use crate::buf::Queue;
 use crate::limits::SigDet;
+use crate::reputation::{Event, Tier};
 use crate::stats::Stats;
 use crate::sys::{self, Errno, EventFlags};
 use crate::worker::Ctx;
@@ -100,6 +101,7 @@ pub(crate) struct Link {
     pub sigdets: HashMap<String, SigDet>,
     /// A bandwidth charge asked for a pause; the connection schedules it when the event is done.
     pub pending_throttle_ms: u64,
+    pub tier: Tier,
     pub stream_cap: usize,
     #[allow(dead_code)] // read by the per-IP limits and logs
     pub peer: SocketAddr,
@@ -134,6 +136,11 @@ fn fail_reason(e: Errno) -> bool {
 }
 
 impl Link {
+    /// Remote reads are suspended: the client is not draining, or its bandwidth budget is spent.
+    pub(crate) fn reads_suspended(&self) -> bool {
+        self.paused || self.throttled
+    }
+
     pub(crate) fn want(&self) -> EventFlags {
         let mut f = EventFlags::empty();
         if !self.throttled {
@@ -155,8 +162,21 @@ impl Link {
         }
     }
 
+    pub(crate) fn rep_source(&self, cx: &Ctx, e: Event) {
+        if let Some(r) = cx.sh.reputation.as_ref() {
+            r.add_source(&self.ip, e);
+        }
+    }
+
+    pub(crate) fn rep_dest(&self, cx: &Ctx, dest: &str, e: Event) {
+        if let Some(r) = cx.sh.reputation.as_ref() {
+            r.add_dest(dest, e, Some(&self.ip));
+        }
+    }
+
     /// Count a flood-protection violation; enough of them close the connection.
     pub(crate) fn violation(&mut self, cx: &Ctx) {
+        self.rep_source(cx, Event::ProtocolViolation);
         let limit = cx.cfg().flood.ws_close_after_violations;
         if limit == 0 {
             return;
@@ -173,11 +193,12 @@ impl Link {
         let Some(bw) = cx.sh.bandwidth.as_ref() else {
             return;
         };
-        if self.throttled {
-            return;
-        }
+        // Every byte is charged, throttled or not, so pacing holds in both directions; the pause
+        // itself is only scheduled when one is not already running.
         let wait = bw.charge(&self.ip, bytes, cx.sh.now_ms());
-        self.pending_throttle_ms = self.pending_throttle_ms.max(wait);
+        if !self.throttled {
+            self.pending_throttle_ms = self.pending_throttle_ms.max(wait);
+        }
     }
 
     /// Mark the connection for teardown; the worker frees it when the current event is done.

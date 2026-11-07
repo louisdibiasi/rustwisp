@@ -218,3 +218,70 @@ fn bandwidth_limit_paces_a_transfer_without_losing_bytes() {
     );
     h.stop_and_join();
 }
+
+fn reputation_cfg(warn: u32, throttle: u32, strict: u32, store: &str) -> Config {
+    let base = test_config();
+    Config {
+        reputation_enabled: true,
+        reputation: holywisp_config::ReputationConfig {
+            store_path: store.into(),
+            warn,
+            throttle,
+            strict,
+            ..base.reputation.clone()
+        },
+        ..base
+    }
+}
+
+#[test]
+fn a_source_that_keeps_probing_private_space_gets_refused() {
+    let h = start(reputation_cfg(0, 0, 25, ""));
+    let mut c = Client::v1(h.port());
+    // Two blocked private connects: 15 points each.
+    c.connect_stream(1, holywisp_proto::wisp::stream_type::TCP, "10.0.0.5", 80);
+    c.expect_close(1, close::BLOCKED);
+    c.connect_stream(2, holywisp_proto::wisp::stream_type::TCP, "10.0.0.6", 80);
+    c.expect_close(2, close::BLOCKED);
+    assert!(upgrade_status(h.port(), "").contains("403"));
+    h.stop_and_join();
+}
+
+#[test]
+fn the_throttle_tier_caps_streams_per_connection() {
+    let echo = echo_server();
+    let h = start(reputation_cfg(0, 10, 0, ""));
+    let mut c = Client::v1(h.port());
+    c.connect_stream(1, holywisp_proto::wisp::stream_type::TCP, "10.0.0.5", 80);
+    c.expect_close(1, close::BLOCKED);
+    // 15 points puts this address in the throttle tier for new connections.
+    let mut c = Client::v1(h.port());
+    for sid in 1..=16 {
+        c.tcp(sid, echo);
+    }
+    c.tcp(17, echo);
+    c.expect_close(17, close::THROTTLED);
+    h.stop_and_join();
+}
+
+#[test]
+fn reputation_survives_a_restart() {
+    let dir = std::env::temp_dir().join(format!("hw-e2e-rep-{}", std::process::id()));
+    let store = dir.join("rep.json");
+    let store = store.to_string_lossy().into_owned();
+    let h = start(reputation_cfg(0, 0, 25, &store));
+    let mut c = Client::v1(h.port());
+    for sid in [1, 2] {
+        c.connect_stream(sid, holywisp_proto::wisp::stream_type::TCP, "10.0.0.5", 80);
+        c.expect_close(sid, close::BLOCKED);
+    }
+    h.stop_and_join();
+
+    let h = start(reputation_cfg(0, 0, 25, &store));
+    assert!(
+        upgrade_status(h.port(), "").contains("403"),
+        "score was loaded"
+    );
+    h.stop_and_join();
+    let _ = std::fs::remove_dir_all(&dir);
+}

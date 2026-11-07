@@ -16,6 +16,7 @@ use crate::buf::Queue;
 use crate::dns::DnsDone;
 use crate::filter;
 use crate::link::{Link, Reg, State};
+use crate::reputation::{Event, Tier};
 use crate::stats::Stats;
 use crate::stream::{self, SState, Stream};
 use crate::sys::{self, Errno, EventFlags};
@@ -82,6 +83,7 @@ impl Conn {
                 conn_slot: false,
                 sigdets: HashMap::new(),
                 pending_throttle_ms: 0,
+                tier: Tier::Normal,
                 stream_cap,
                 peer,
                 ip,
@@ -135,12 +137,12 @@ impl Conn {
                 TimerKind::Throttle,
             );
         }
-        if self.link.paused == self.applied_paused {
+        let paused = self.link.reads_suspended();
+        if paused == self.applied_paused {
             return;
         }
-        self.applied_paused = self.link.paused;
+        self.applied_paused = paused;
         self.link.pause_changed = false;
-        let paused = self.link.paused;
         for s in self.streams.values_mut() {
             stream::set_paused(cx, s, paused);
         }
@@ -331,6 +333,17 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
             return used;
         }
         self.resolve_real_ip(cx, &req);
+        if self.apply_reputation(cx).is_err() {
+            self.http_reply(
+                cx,
+                403,
+                "Forbidden",
+                "text/plain; charset=utf-8",
+                b"blocked
+",
+            );
+            return used;
+        }
         if let Some(rate) = cx.sh.conn_rate.as_ref()
             && !rate.allow(&self.link.ip, cx.sh.now_ms())
         {
@@ -389,6 +402,24 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
         // Whatever followed the head is frame data.
         let rest = &mut data[used..];
         used + self.process_frames(cx, rest)
+    }
+
+    /// Apply the source's reputation tier: STRICT refuses, THROTTLE tightens the stream cap.
+    fn apply_reputation(&mut self, cx: &Ctx) -> Result<(), ()> {
+        let Some(rep) = cx.sh.reputation.as_ref() else {
+            return Ok(());
+        };
+        let tier = rep.tier(rep.source_score(&self.link.ip));
+        self.link.tier = tier;
+        if tier == Tier::Strict {
+            Stats::inc(&cx.sh.stats.refused_reputation);
+            return Err(());
+        }
+        if tier >= Tier::Throttle {
+            let cap = cx.cfg().max_streams_per_conn as usize;
+            self.link.stream_cap = if cap > 0 { cap.min(16) } else { 16 };
+        }
+        Ok(())
     }
 
     /// Fill `link.ip` from the trusted-proxy headers when the peer is a trusted proxy.
@@ -499,6 +530,7 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
         {
             if !Self::password_ok(cx, u, pw) {
                 Stats::inc(&cx.sh.stats.auth_failures);
+                self.link.rep_source(cx, Event::AuthFailure);
                 self.link.send_close(cx, 0, close::AUTH_BAD_PASSWORD);
                 self.link.close();
                 return;
@@ -507,6 +539,7 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
         }
         if c.password_required && !self.link.authenticated {
             Stats::inc(&cx.sh.stats.auth_failures);
+            self.link.rep_source(cx, Event::AuthFailure);
             self.link.send_close(cx, 0, close::AUTH_REQUIRED);
             self.link.close();
             return;
@@ -561,6 +594,7 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
             && !rate.allow(&self.link.ip, cx.sh.now_ms())
         {
             Stats::inc(&cx.sh.stats.throttled_source);
+            self.link.rep_source(cx, Event::BurstRate);
             self.link.violation(cx);
             if self.link.closing {
                 return;

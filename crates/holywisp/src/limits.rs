@@ -5,6 +5,9 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, Ordering};
 
+/// Keys one limiter holds before it purges the expired ones on the spot.
+const MAX_WINDOW_KEYS: usize = 262_144;
+
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -33,6 +36,11 @@ impl Window {
             return true;
         }
         let mut map = lock(&self.entries);
+        if map.len() >= MAX_WINDOW_KEYS && !map.contains_key(key) {
+            // Over capacity: shed the keys whose window has already ended.
+            let window = self.window_ms;
+            map.retain(|_, (start, _)| now_ms.saturating_sub(*start) < window);
+        }
         let e = match map.get_mut(key) {
             Some(e) => e,
             None => map.entry(key.to_string()).or_insert((now_ms, 0)),
@@ -183,6 +191,15 @@ impl SigDet {
                 break;
             }
             self.count -= 1;
+        }
+    }
+
+    /// When the newest sample was recorded (0 if none).
+    pub fn last_seen(&self) -> u64 {
+        if self.count == 0 {
+            0
+        } else {
+            self.at[(self.head + SIGDET_RING - 1) % SIGDET_RING]
         }
     }
 
