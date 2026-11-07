@@ -522,3 +522,24 @@ fn stats_count_traffic() {
     );
     h.stop_and_join();
 }
+
+#[test]
+fn numeric_looking_hostnames_cannot_sneak_past_the_direct_ip_switch() {
+    let echo = echo_server();
+    let cfg = holywisp_config::Config {
+        allow_direct_ip: false,
+        ..test_config()
+    };
+    let h = start(cfg);
+    let mut c = Client::v1(h.port());
+    for (sid, host) in [
+        (1, "0x7f.0.0.1"),
+        (2, "127.1"),
+        (3, "2130706433"),
+        (4, "0177.0.0.1"),
+    ] {
+        c.connect_stream(sid, stream_type::TCP, host, echo);
+        c.expect_close(sid, close::INVALID_INFO);
+    }
+    h.stop_and_join();
+}

@@ -70,24 +70,44 @@ fn classify_v6(ip: Ipv6Addr) -> AddrClass {
         };
     }
     let embedded = |at: usize| Ipv4Addr::new(a[at], a[at + 1], a[at + 2], a[at + 3]);
+    let zeros = |r: std::ops::Range<usize>| a[r].iter().all(|&b| b == 0);
     // ::ffff:a.b.c.d is an IPv4 address in v6 clothes and keeps its own class.
-    if a[..10].iter().all(|&b| b == 0) && a[10] == 0xff && a[11] == 0xff {
+    if zeros(0..10) && a[10] == 0xff && a[11] == 0xff {
         return classify_v4(embedded(12));
     }
-    // 64:ff9b::/96 (NAT64) and ::a.b.c.d (deprecated IPv4-compatible) also wrap an IPv4 address.
-    let nat64 = a[..4] == [0, 0x64, 0xff, 0x9b] && a[4..12].iter().all(|&b| b == 0);
-    if nat64 || a[..12].iter().all(|&b| b == 0) {
+    // ::ffff:0:a.b.c.d (SIIT), 64:ff9b::/96 (NAT64) and ::a.b.c.d (deprecated IPv4-compatible)
+    // all wrap an IPv4 address that must never make the whole address count as public.
+    let siit = zeros(0..8) && a[8] == 0xff && a[9] == 0xff && a[10] == 0 && a[11] == 0;
+    let nat64 = a[..4] == [0, 0x64, 0xff, 0x9b] && zeros(4..12);
+    if siit || nat64 || zeros(0..12) {
         return wrapped_v4(classify_v4(embedded(12)));
     }
-    match (a[0], a[1], a[2], a[3]) {
-        (0xff, ..) => AddrClass::Multicast,
-        (b, ..) if b & 0xfe == 0xfc => AddrClass::Private, // fc00::/7 ULA
-        (0xfe, b, ..) if b & 0xc0 == 0x80 => AddrClass::LinkLocal,
-        (0xfe, b, ..) if b & 0xc0 == 0xc0 => AddrClass::Reserved, // fec0::/10 site-local
-        (0x20, 0x01, 0x0d, 0xb8) => AddrClass::Reserved,          // documentation
-        (0x20, 0x02, ..) => wrapped_v4(classify_v4(embedded(2))), // 6to4
-        (0x20, 0x01, 0, 0) => AddrClass::Reserved,                // Teredo
-        _ => AddrClass::Public,
+    if a[0] == 0xff {
+        return AddrClass::Multicast;
+    }
+    if a[0] & 0xfe == 0xfc {
+        return AddrClass::Private; // fc00::/7 unique local
+    }
+    if a[0] == 0xfe {
+        return match a[1] & 0xc0 {
+            0x80 => AddrClass::LinkLocal,
+            _ => AddrClass::Reserved, // fec0::/10 site-local and the rest of fe00::/8
+        };
+    }
+    // Only 2000::/3 is global unicast; everything else is unassigned or special-purpose.
+    if a[0] & 0xe0 != 0x20 {
+        return AddrClass::Reserved;
+    }
+    if a[0] == 0x20 && a[1] == 0x02 {
+        return wrapped_v4(classify_v4(embedded(2))); // 6to4
+    }
+    let special = (a[0] == 0x20 && a[1] == 0x01 && a[2] < 0x02) // 2001::/23 IETF, Teredo, ORCHID...
+        || a[..4] == [0x20, 0x01, 0x0d, 0xb8] // documentation
+        || (a[0] == 0x3f && a[1] == 0xff && a[2] < 0x10); // 3fff::/20 documentation
+    if special {
+        AddrClass::Reserved
+    } else {
+        AddrClass::Public
     }
 }
 
@@ -147,6 +167,15 @@ mod tests {
         assert_eq!(c("ff02::1"), AddrClass::Multicast);
         assert_eq!(c("2001:db8::1"), AddrClass::Reserved);
         assert_eq!(c("2606:4700::1111"), AddrClass::Public);
+        assert_eq!(c("4000::1"), AddrClass::Reserved, "outside 2000::/3");
+        assert_eq!(c("2001:0:4136:e378::1"), AddrClass::Reserved, "Teredo");
+        assert_eq!(
+            c("2001:20::1"),
+            AddrClass::Reserved,
+            "ORCHIDv2, inside 2001::/23"
+        );
+        assert_eq!(c("3fff::1"), AddrClass::Reserved);
+        assert_eq!(c("64:ff9b:1::1"), AddrClass::Reserved, "local-use NAT64");
     }
 
     #[test]
@@ -159,6 +188,8 @@ mod tests {
         assert_eq!(c("2002:7f00:1::"), AddrClass::Loopback);
         assert_eq!(c("2002:0808:0808::"), AddrClass::Reserved);
         assert_eq!(c("::10.0.0.1"), AddrClass::Private);
+        assert_eq!(c("::ffff:0:10.0.0.1"), AddrClass::Private, "SIIT");
+        assert_eq!(c("::ffff:0:8.8.8.8"), AddrClass::Reserved);
     }
 
     #[test]

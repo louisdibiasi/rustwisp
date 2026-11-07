@@ -362,3 +362,28 @@ fn eager_client_frames_after_the_upgrade_are_not_lost() {
     }
     h.stop_and_join();
 }
+
+#[test]
+fn a_client_that_pings_without_reading_is_dropped() {
+    let cfg = holywisp_config::Config {
+        ws_write_high_water: 64 * 1024,
+        ..test_config()
+    };
+    let h = start(cfg);
+    let mut c = Client::v1(h.port());
+    let ping = c.frame_bytes(opcode::PING, true, &[7u8; 125]);
+    // Never read. The kernel buffers some megabytes of pongs, then the server's own queue grows
+    // past its cap and the connection is closed, which shows up as a failed write.
+    let mut failed = false;
+    for _ in 0..2_000_000 {
+        if c.sock.write_all(&ping).is_err() {
+            failed = true;
+            break;
+        }
+    }
+    assert!(
+        failed,
+        "the server kept an unbounded queue for a client that never reads"
+    );
+    h.stop_and_join();
+}

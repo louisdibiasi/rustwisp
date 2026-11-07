@@ -79,8 +79,17 @@ pub(crate) fn parse_literal(host: &str) -> Result<Option<IpAddr>, ()> {
     if let Ok(ip) = inner.parse::<IpAddr>() {
         return Ok(Some(ip));
     }
-    let digits_and_dots = !host.is_empty() && host.bytes().all(|b| b == b'.' || b.is_ascii_digit());
-    if bracketed || digits_and_dots || host.contains(':') {
+    // The system resolver also reads `127.1`, `2130706433` and `0x7f.0.0.1` as addresses. A real
+    // hostname never ends in a numeric label, so anything that does is refused here instead of
+    // being resolved behind the direct-IP switch and the host filters.
+    let last = host.rsplit('.').next().unwrap_or(host);
+    let numeric_label = !last.is_empty()
+        && (last.bytes().all(|b| b.is_ascii_digit())
+            || last
+                .strip_prefix("0x")
+                .or_else(|| last.strip_prefix("0X"))
+                .is_some_and(|h| h.bytes().all(|b| b.is_ascii_hexdigit())));
+    if bracketed || numeric_label || host.contains(':') {
         return Err(());
     }
     Ok(None)
@@ -597,5 +606,13 @@ mod tests {
         assert_eq!(parse_literal("[example.com]"), Err(()));
         assert_eq!(parse_literal("fe80::1%eth0"), Err(()));
         assert_eq!(parse_literal("host:80"), Err(()));
+        // Forms the system resolver would read as addresses.
+        assert_eq!(parse_literal("127.1"), Err(()));
+        assert_eq!(parse_literal("2130706433"), Err(()));
+        assert_eq!(parse_literal("0x7f.0.0.1"), Err(()));
+        assert_eq!(parse_literal("0x7f000001"), Err(()));
+        assert_eq!(parse_literal("0177.0.0.1"), Err(()));
+        assert_eq!(parse_literal("1password.com"), Ok(None));
+        assert_eq!(parse_literal("0xdead.beef.example"), Ok(None));
     }
 }

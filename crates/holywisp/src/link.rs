@@ -155,6 +155,12 @@ impl Link {
     fn backpressure(&mut self, cx: &Ctx) {
         let queued = self.wbuf.len();
         let high = cx.cfg().ws_write_high_water as usize;
+        // A client that keeps asking for replies (pings) and never reads them must not grow the
+        // queue without bound: past twice the high-water mark plus one message, drop it.
+        if queued > high.saturating_mul(2) + cx.cfg().max_message_size as usize {
+            self.closing = true;
+            return;
+        }
         if !self.paused && queued > high {
             self.paused = true;
             self.pause_changed = true;
