@@ -156,11 +156,22 @@ pub fn parse_info<'a>(p: &Packet<'a>) -> Result<Info<'a>, ProtoError> {
                     out.password_required = meta[0] != 0;
                 } else if !meta.is_empty() {
                     let ulen = meta[0] as usize;
-                    if 1 + ulen > meta.len() {
-                        return Err(ProtoError::Invalid);
+                    // The Wisp v2 spec layout is u8 user length, u16 password length, user, pass.
+                    // The C server reads u8 user length, user, pass (no password length). Take the
+                    // spec layout when its lengths add up exactly, otherwise the C one.
+                    let spec = (meta.len() >= 3)
+                        .then(|| 3 + ulen + usize::from(le16(&meta[1..3])))
+                        .filter(|total| *total == meta.len());
+                    if spec.is_some() {
+                        out.user = Some(&meta[3..3 + ulen]);
+                        out.pass = Some(&meta[3 + ulen..]);
+                    } else {
+                        if 1 + ulen > meta.len() {
+                            return Err(ProtoError::Invalid);
+                        }
+                        out.user = Some(&meta[1..1 + ulen]);
+                        out.pass = Some(&meta[1 + ulen..]);
                     }
-                    out.user = Some(&meta[1..1 + ulen]);
-                    out.pass = Some(&meta[1 + ulen..]);
                 }
             }
             _ => {}
@@ -426,5 +437,18 @@ mod tests {
         assert_eq!(type_str(0xff), "UNKNOWN");
         assert_eq!(close_reason_str(close::BLOCKED), "host blocked");
         assert_eq!(close_reason_str(0), "?");
+    }
+
+    #[test]
+    fn info_password_spec_layout_is_understood_next_to_the_c_layout() {
+        // Spec layout: u8 user length, u16 password length, user, password.
+        let mut meta = vec![5u8, 6, 0];
+        meta.extend_from_slice(b"alicesecret");
+        let mut tmp = [0u8; 64];
+        let n = build_extension(&mut tmp, ext::PASSWORD, &meta).unwrap();
+        let pkt = info_packet(&tmp[..n]);
+        let info = parse_info(&parse(&pkt).unwrap()).unwrap();
+        assert_eq!(info.user, Some(&b"alice"[..]));
+        assert_eq!(info.pass, Some(&b"secret"[..]));
     }
 }
