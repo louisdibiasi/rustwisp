@@ -130,6 +130,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "holywisp-bench"
+version = "0.1.0"
+dependencies = [
+ "holywisp-client",
+]
+
+[[package]]
 name = "holywisp-client"
 version = "0.1.0"
 dependencies = [

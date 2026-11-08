@@ -17,7 +17,8 @@ This guide covers building the server, running it, configuring it, putting it on
 11. [Using the library](#using-the-library)
 12. [Close reasons](#close-reasons)
 13. [Troubleshooting](#troubleshooting)
-14. [Working on the code](#working-on-the-code)
+14. [Benchmarking](#benchmarking)
+15. [Working on the code](#working-on-the-code)
 
 ## Build
 
@@ -251,14 +252,51 @@ When a stream ends, the server says why with one byte.
 
 **The server will not start and prints a config error.** The message names the file and line. Fix that line and try again.
 
+## Benchmarking
+
+`holywisp-bench` puts servers side by side and reports what each one costs. It starts the server, a small counting echo service and a load generator itself, and it reads the server's CPU time, peak memory and context switches from `/proc`, so it needs Linux. It only talks to servers over the network, which means any Wisp server that takes the same flags can be a contender, the C holyWisp included.
+
+```sh
+cargo build --release
+target/release/holywisp-bench run \
+    --server c=/path/to/holywisp-c/build/release/holywisp \
+    --server rust=target/release/holywisp \
+    --out results.tsv
+```
+
+The first `--server` is the baseline; the others are shown as a ratio against it. Each server gets `--port` and a set of flags that allow loopback targets and switch off the limiters, so the limits do not skew the result. Add your own options after the command, for example `--server rust4="target/release/holywisp --workers 4"`.
+
+The scenarios follow the upstream benchmark, so the numbers can be read next to its tables. `holywisp-bench run --list` shows them:
+
+| Scenario | What it does |
+| --- | --- |
+| `native-1`, `native-10` | One connection, 1 or 10 streams, kept full with 64 KiB packets. |
+| `native-10-1m` | The same with 1 MiB packets. |
+| `conns-8x4`, `conns-16x4` | 8 or 16 connections with 4 streams each. |
+| `rtt-64` | One 64-byte message at a time; p50, p99, p99.9 and max round trip. |
+| `churn` | Open a stream, echo a byte, close it, as fast as it goes. |
+
+Throughput is counted by the echo service, not by the client, in the window after a 2 second warm-up. The table also shows the server's CPU seconds, MiB moved per CPU second, TCP segments and context switches per MiB, and peak memory. MiB per CPU second is the number that says how efficient a server is when the machine is busy with other things.
+
+Useful options: `--scenarios native-1,rtt-64` runs part of the matrix, `--secs` and `--reps` set the length and the number of repetitions (the median is reported, with the range), and `--base-port` moves the ports. Repetitions are interleaved between servers, so slow drift in the machine hits all of them alike. To compare two saved runs, for example before and after a change:
+
+```sh
+holywisp-bench compare before.tsv after.tsv
+```
+
+It prints the ratio for each headline number and marks anything within 8 percent as noise, which is about how much two runs of the same build differ here.
+
+A few things to keep in mind. Everything runs on one machine, so the load generator and the echo service take CPU from the server; use the CPU-per-MiB columns, not only the raw rate. The load generator is a client like any other and tops out around 2 GiB/s on a single connection, so when two servers both land near that figure (the `native-10` row does), compare the CPU columns instead. Loopback skips most of the network stack, and under WSL it is not the kernel you would deploy on. Close other programs and repeat a result before you believe it. The churn scenario opens streams one after another on a single connection, so its rate is limited by round trips and will be lower than a pipelined test would show; it is meant for comparing servers, not for quoting.
+
 ## Working on the code
 
-The workspace has four crates:
+The workspace has five crates:
 
 - `holywisp-proto`: Wisp packets, WebSocket frame headers, the HTTP upgrade parser and the SIMD unmask routine. No I/O, so it is easy to test.
 - `holywisp-config`: the config file and flags.
 - `holywisp`: the server.
 - `holywisp-client`: the client library and `holywisp-cli`.
+- `holywisp-bench`: the benchmark tool described above.
 
 ```sh
 cargo fmt --all --check

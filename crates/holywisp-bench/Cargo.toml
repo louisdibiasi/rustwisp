@@ -1,0 +1,19 @@
+[package]
+name = "holywisp-bench"
+description = "Benchmark harness for Wisp servers: throughput, latency and connection churn, with CPU and memory per byte"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "holywisp-bench"
+path = "src/main.rs"
+
+[dependencies]
+holywisp-client = { path = "../holywisp-client" }
+
+[lints]
+workspace = true

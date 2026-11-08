@@ -8,6 +8,7 @@ It speaks Wisp v1 and v2, so existing clients such as wisp-js and the browser cl
 
 - `holywisp`, the server. One epoll loop per worker thread, `SO_REUSEPORT`, per-stream flow control, `/health` and `/stats`, and the built-in browser client on `GET /`.
 - `holywisp-cli`, a netcat that goes through a Wisp server.
+- `holywisp-bench`, a benchmark tool that compares servers on speed, latency and CPU cost per byte.
 - `holywisp-client`, the Rust library behind the CLI, if you want to talk to a Wisp server from your own program.
 - Egress rules that deny by default: no loopback, private ranges or literal IPs unless you turn them on, and the check runs on the addresses a name resolves to, not just the name.
 - Flood protection, per-IP limits, bandwidth pacing and an IP reputation store, all on by default and configurable.
@@ -38,15 +39,21 @@ The [guide](docs/GUIDE.md) covers configuration, deployment behind a reverse pro
 
 The C server already uses epoll well, so switching language buys little by itself. Most of the speed-up comes from one change: on the way from the remote server back to the client, payload bytes go through `splice` instead of being copied in user space. The client's reads are also larger. Traffic in the other direction is still copied, because every byte has to be unmasked.
 
-Measured on one machine (i7-13700KF, WSL2, loopback, median of five 5-second runs, the C server as the control):
+Measured with the `holywisp-bench` tool in this repo (i7-13700KF, WSL2, loopback, median of three 5-second runs, the C server as the baseline):
 
-| Scenario | C | Rust |
-| --- | --- | --- |
-| 1 stream, MiB/s | 2377 | 2850 |
-| 10 streams, MiB/s | 1967 | 3778 |
-| Latency, 64-byte round trip | about 50 us | about 50 us |
+| Scenario | C | Rust | Rust vs C | Per CPU-second |
+| --- | --- | --- | --- | --- |
+| 1 stream, MiB/s | 1796 | 2080 | 1.16x | 1.42x |
+| 10 streams | 1981 | 2134 | 1.08x | 1.20x |
+| 10 streams, 1 MiB packets | 1922 | 3317 | 1.73x | 1.81x |
+| 8 connections x 4 streams | 6974 | 8041 | 1.15x | 1.36x |
+| 16 connections x 4 streams | 7479 | 8907 | 1.19x | 1.69x |
+| Round trip, 64 bytes (p50) | 50.8 us | 50.6 us | same | |
+| Stream churn, per second | 7981 | 8181 | same | |
 
-Take these as rough numbers. Loopback inside WSL is not a real network, runs differ by about 8 percent either way, and I have not repeated them on bare metal yet. A single stream is a bit faster, ten streams are much faster, and latency is the same.
+"Per CPU-second" is megabytes moved for each second of CPU the server used, which matters more than the raw rate when the machine has other work to do.
+
+Take these as rough numbers. Loopback inside WSL is not a real network, runs differ by about 8 percent either way, and I have not repeated them on bare metal yet. The tool's own load generator tops out around 2 GiB/s on a single connection, so the 10-stream row understates the difference: an earlier test with a different generator saw about 1.9x there. Run `holywisp-bench` yourself to check on your hardware; the [guide](docs/GUIDE.md#benchmarking) shows how.
 
 ## Not done yet
 
