@@ -11,6 +11,7 @@ It speaks Wisp v1 and v2, so existing clients such as wisp-js and the browser cl
 - `holywisp-client`, the Rust library behind the CLI, if you want to talk to a Wisp server from your own program.
 - Egress rules that deny by default: no loopback, private ranges or literal IPs unless you turn them on, and the check runs on the addresses a name resolves to, not just the name.
 - Flood protection, per-IP limits, bandwidth pacing and an IP reputation store, all on by default and configurable.
+- Optional upstream proxy (SOCKS5 or HTTP CONNECT) for outbound TCP, and hashed passwords checked off the event loop.
 
 ## Quick start
 
@@ -50,8 +51,8 @@ Take these as rough numbers. Loopback inside WSL is not a real network, runs dif
 ## Not done yet
 
 - Twisp (terminal streams) is not implemented. `enable-twisp` is accepted but nothing serves it.
-- Passwords in `password-user` are compared as plain text. `crypt(3)` hashes are not checked yet, so a value starting with `$` never matches.
-- `proxy` (upstream SOCKS5/HTTP) and `dns-server` (custom resolvers) are read but not used. Names are resolved with the system resolver.
+- `password-user` accepts plain text and bcrypt, SHA-256 and SHA-512 hashes. yescrypt (`$y$`) and MD5 are refused at startup.
+- `dns-server` (custom resolvers) is read but not used. Names are resolved with the system resolver.
 - Logging is minimal: startup and shutdown lines, nothing per connection.
 - The server has no config reload. Restart it to apply changes.
 - TLS is not built in. Run it behind nginx, Caddy or similar for `wss://`.

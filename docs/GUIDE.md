@@ -9,14 +9,15 @@ This guide covers building the server, running it, configuring it, putting it on
 3. [Configuration](#configuration)
 4. [What clients are allowed to reach](#what-clients-are-allowed-to-reach)
 5. [Passwords](#passwords)
-6. [Behind a reverse proxy](#behind-a-reverse-proxy)
-7. [Running under systemd](#running-under-systemd)
-8. [Health and stats](#health-and-stats)
-9. [The command line client](#the-command-line-client)
-10. [Using the library](#using-the-library)
-11. [Close reasons](#close-reasons)
-12. [Troubleshooting](#troubleshooting)
-13. [Working on the code](#working-on-the-code)
+6. [Sending traffic through another proxy](#sending-traffic-through-another-proxy)
+7. [Behind a reverse proxy](#behind-a-reverse-proxy)
+8. [Running under systemd](#running-under-systemd)
+9. [Health and stats](#health-and-stats)
+10. [The command line client](#the-command-line-client)
+11. [Using the library](#using-the-library)
+12. [Close reasons](#close-reasons)
+13. [Troubleshooting](#troubleshooting)
+14. [Working on the code](#working-on-the-code)
 
 ## Build
 
@@ -88,7 +89,37 @@ password-required = on
 password-user = alice:correct horse
 ```
 
-Only Wisp v2 clients can log in. Passwords are compared as plain text for now, so keep the config file readable only by the account that runs the server. Hashed values (`$2b$...`, `$6$...`) are not checked yet and will never match.
+Only Wisp v2 clients can log in. A plain-text entry means the config file holds the password, so keep it readable only by the account that runs the server. Better, store a hash instead. These are accepted:
+
+| Prefix | Scheme | Make one with |
+| --- | --- | --- |
+| `$2b$` (also `$2a$`, `$2x$`, `$2y$`) | bcrypt | `htpasswd -nbB -C 12 alice 'password'` (the part after the colon) |
+| `$5$` | SHA-256 crypt | `mkpasswd -m sha-256` |
+| `$6$` | SHA-512 crypt | `mkpasswd -m sha-512` |
+
+```
+password-user = alice:$2b$12$...your hash...
+```
+
+yescrypt (`$y$`) and MD5 (`$1$`) are not supported, and the server refuses to start with one in the config, naming the user, so nobody gets locked out by surprise.
+
+Checking a hash is slow on purpose, so it runs on two helper threads and not on the connection's own thread. A bounded queue sits in front of them: if more than 64 checks are waiting, new logins are refused until it drains. A name that does not exist costs the same time as a wrong password, so response time does not reveal who has an account.
+
+## Sending traffic through another proxy
+
+If the server itself should reach the internet through a SOCKS5 or HTTP proxy (a VPN gateway, Tor, a corporate proxy), set `proxy`:
+
+```
+proxy = socks5://127.0.0.1:1080
+# proxy = socks5://user:pass@host:1080     (special characters in the login as %40 and so on)
+# proxy = http://host:3128                 (uses CONNECT)
+```
+
+Every outbound TCP stream then goes to the proxy, which makes the last hop. The destination name is resolved and checked against your rules here first, then the proxy gets the name exactly as the client wrote it. The proxy resolves it again, so its answer can differ from ours. If you rely on the egress rules to keep clients out of private networks, give the proxy the same rules.
+
+UDP cannot go through these proxies. By default UDP streams are refused. `proxy-udp = direct` sends them straight out instead, bypassing the proxy, which may not be what you want if the proxy is there to hide the server's address.
+
+The proxy's own address is resolved once at startup; the server will not start if it cannot. `https://` proxies (TLS to the proxy) are not supported. A failed proxy handshake closes the stream with the matching reason: refused, blocked, unreachable or timed out.
 
 ## Behind a reverse proxy
 
