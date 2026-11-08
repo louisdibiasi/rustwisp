@@ -176,7 +176,7 @@ fn open(c: &mut Client, sid: u32, host: &str, port: u16) {
 }
 
 #[test]
-fn socks5_carries_a_stream_and_receives_the_name_as_given() {
+fn socks5_carries_a_stream_and_is_told_the_checked_address() {
     let echo = echo_server();
     let proxy = fake_proxy(
         Mode::Socks {
@@ -190,6 +190,27 @@ fn socks5_carries_a_stream_and_receives_the_name_as_given() {
     open(&mut c, 1, "localhost", echo);
     c.send_packet(ptype::DATA, 1, b"hello"); // sent before the tunnel is up
     assert_eq!(c.read_data(1, 5), b"hello");
+    assert_eq!(*proxy.seen.lock().unwrap(), [format!("127.0.0.1:{echo}")]);
+    h.stop_and_join();
+}
+
+#[test]
+fn the_name_goes_to_the_proxy_only_when_asked_for() {
+    let echo = echo_server();
+    let proxy = fake_proxy(
+        Mode::Socks {
+            login: false,
+            refuse: 0,
+        },
+        b"",
+    );
+    let mut cfg = via(&format!("socks5://127.0.0.1:{}", proxy.port));
+    cfg.proxy_send_hostnames = true;
+    let h = start(cfg);
+    let mut c = Client::v1(h.port());
+    open(&mut c, 1, "localhost", echo);
+    c.send_packet(ptype::DATA, 1, b"hi");
+    assert_eq!(c.read_data(1, 2), b"hi");
     assert_eq!(*proxy.seen.lock().unwrap(), [format!("localhost:{echo}")]);
     h.stop_and_join();
 }
@@ -226,7 +247,7 @@ fn http_connect_carries_a_stream_with_basic_auth() {
     c.send_packet(ptype::DATA, 1, b"ping");
     assert_eq!(c.read_data(1, 4), b"ping");
     let seen = proxy.seen.lock().unwrap();
-    assert_eq!(seen[0], format!("localhost:{echo}"));
+    assert_eq!(seen[0], format!("127.0.0.1:{echo}"));
     assert_eq!(seen[1], "Proxy-Authorization: Basic dTpw");
     drop(seen);
     h.stop_and_join();

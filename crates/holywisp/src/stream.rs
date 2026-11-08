@@ -74,6 +74,8 @@ pub(crate) struct Stream {
     /// `ip:port` of the first resolved address, the key for per-destination limits.
     pub dest: String,
     pub hs: Option<Box<ProxyHs>>,
+    /// The address that passed the egress checks; the proxy is told to connect to exactly this.
+    pub vetted: Option<IpAddr>,
 }
 
 fn map_errno(e: Errno) -> u8 {
@@ -143,6 +145,7 @@ fn new_stream(cx: &mut Ctx, conn_tok: u64, id: u32, udp: bool, host: &str, port:
         syn_held: false,
         dest: String::new(),
         hs: None,
+        vetted: None,
     }
 }
 
@@ -382,6 +385,7 @@ fn begin_connect(link: &mut Link, cx: &mut Ctx, s: &mut Stream) {
     if proxied(cx, s)
         && let Some(up) = cx.sh.upstream.as_ref()
     {
+        s.vetted = s.addrs.first().map(SocketAddr::ip);
         s.addrs = up.addrs.clone();
         s.addr_idx = 0;
     }
@@ -507,7 +511,13 @@ fn start_proxy(link: &mut Link, cx: &mut Ctx, s: &mut Stream) {
         return connected(link, cx, s);
     };
     let creds = up.cfg.user.as_deref().zip(up.cfg.pass.as_deref());
-    let (machine, first) = match Handshake::new(up.cfg.kind, creds, &s.host, s.port) {
+    // By default the proxy gets the address that was checked here, so it cannot be steered
+    // elsewhere by a name that resolves differently on its side (DNS rebinding).
+    let target = match s.vetted {
+        Some(ip) if !cx.cfg().proxy_send_hostnames => ip.to_string(),
+        _ => s.host.clone(),
+    };
+    let (machine, first) = match Handshake::new(up.cfg.kind, creds, &target, s.port) {
         Ok(started) => started,
         Err(reason) => {
             close_stream(link, cx, s, reason, true);

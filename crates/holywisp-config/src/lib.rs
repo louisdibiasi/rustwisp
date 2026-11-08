@@ -132,6 +132,7 @@ pub struct Config {
 
     pub proxy: Option<ProxyUrl>,
     pub proxy_udp_direct: bool,
+    pub proxy_send_hostnames: bool,
     pub dns_servers: Vec<String>,
     pub dns_ttl_s: u32,
     pub dns_negative_ttl_s: u32,
@@ -211,6 +212,7 @@ impl Default for Config {
             },
             proxy: None,
             proxy_udp_direct: false,
+            proxy_send_hostnames: false,
             dns_servers: Vec::new(),
             dns_ttl_s: 120,
             dns_negative_ttl_s: 10,
@@ -403,6 +405,7 @@ impl Config {
                     _ => return Err(bad_value(key, v)),
                 };
             }
+            "proxy-send-hostnames" => self.proxy_send_hostnames = boolean(key, v)?,
             "dns-server" => {
                 if self.dns_servers.len() >= MAX_DNS_SERVERS {
                     return Err("too many dns-server entries".into());

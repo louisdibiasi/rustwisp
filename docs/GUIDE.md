@@ -115,7 +115,9 @@ proxy = socks5://127.0.0.1:1080
 # proxy = http://host:3128                 (uses CONNECT)
 ```
 
-Every outbound TCP stream then goes to the proxy, which makes the last hop. The destination name is resolved and checked against your rules here first, then the proxy gets the name exactly as the client wrote it. The proxy resolves it again, so its answer can differ from ours. If you rely on the egress rules to keep clients out of private networks, give the proxy the same rules.
+Every outbound TCP stream then goes to the proxy, which makes the last hop. The destination name is resolved and checked against your rules here first, and the proxy is told to connect to the address that passed. It never sees the name, so it cannot be pointed somewhere your rules forbid by a name that resolves differently on its side.
+
+Some setups want the proxy to see the name, for example to route by domain. Set `proxy-send-hostnames = on` for that. The proxy then resolves the name itself, and your address checks no longer bind it, so only do this if the proxy enforces its own egress rules.
 
 UDP cannot go through these proxies. By default UDP streams are refused. `proxy-udp = direct` sends them straight out instead, bypassing the proxy, which may not be what you want if the proxy is there to hide the server's address.
 
