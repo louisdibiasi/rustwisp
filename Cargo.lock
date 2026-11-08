@@ -29,6 +29,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "holywisp-client"
+version = "0.1.0"
+dependencies = [
+ "holywisp-proto",
+]
+
+[[package]]
 name = "holywisp-config"
 version = "0.1.0"
 
