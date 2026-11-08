@@ -251,6 +251,9 @@
 					<code>ws://</code> address. Use <code>wss://</code>, or
 					<code>ws://localhost</code> for a server on this machine.
 				</p>
+				<p class="note warn hidden" id="linknote">
+					This server address came from a link. Only connect with a login if you trust it.
+				</p>
 				<div class="pair">
 					<label>
 						Protocol
@@ -512,6 +515,8 @@
 			let totalOut = 0;
 			let respBytes = 0;
 			let streamId = null;
+			// A server address that arrived in the page's link and has not been confirmed or edited.
+			let linkAddr = null;
 
 			const store = {
 				get(k) {
@@ -603,6 +608,12 @@
 					setState('error');
 					return;
 				}
+				if (linkAddr !== null && url === linkAddr) {
+					if ($('user').value && !confirm(`Send your login to ${url}?\n\nThis address came from a link.`)) {
+						setState('idle');
+						return;
+					}
+				}
 				persist();
 				streamId = null;
 				setState('connecting', { ver: '-', win: '-' });
@@ -650,7 +661,11 @@
 			}
 
 			function persist() {
-				for (const id of ['wisp', 'version', 'mode', 'user', 'target', 'rawhost', 'rawport']) store.set(id, $(id).value);
+				for (const id of ['wisp', 'version', 'mode', 'user', 'target', 'rawhost', 'rawport']) {
+					// An address from a link is not remembered until the user has edited or confirmed it.
+					if (id === 'wisp' && linkAddr !== null && $(id).value.trim() === linkAddr) continue;
+					store.set(id, $(id).value);
+				}
 			}
 
 			function shareLink() {
@@ -703,6 +718,10 @@
 				const h = new URLSearchParams(location.hash.slice(1));
 				const map = { wisp: 'wisp', v: 'version', mode: 'mode', target: 'target', host: 'rawhost', port: 'rawport' };
 				for (const [k, id] of Object.entries(map)) if (h.has(k)) $(id).value = h.get(k);
+				if (h.has('wisp')) {
+					linkAddr = h.get('wisp').trim();
+					$('linknote').classList.remove('hidden');
+				}
 				if (!['1', '2'].includes($('version').value)) $('version').value = '2';
 				if (!['http', 'raw'].includes($('mode').value)) $('mode').value = 'http';
 				applyMode();
@@ -722,7 +741,13 @@
 				$('share').onclick = shareLink;
 				$('mode').onchange = applyMode;
 				$('version').onchange = applyVersion;
-				$('wisp').oninput = checkMixed;
+				$('wisp').oninput = () => {
+					if (linkAddr !== null && $('wisp').value.trim() !== linkAddr) {
+						linkAddr = null;
+						$('linknote').classList.add('hidden');
+					}
+					checkMixed();
+				};
 				$('showlog').onchange = (e) => $('log').classList.toggle('hidden', !e.target.checked);
 			}
 
