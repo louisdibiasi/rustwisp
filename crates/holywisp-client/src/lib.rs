@@ -24,6 +24,8 @@ pub use url::WsUrl;
 
 /// Largest DATA payload sent in one packet.
 const MAX_CHUNK: usize = 64 * 1024;
+/// Largest DATA payload `send_with` will build.
+const MAX_PACKET: usize = 1024 * 1024;
 /// Refuse WebSocket messages bigger than this from the server.
 const MAX_MESSAGE: u64 = 16 * 1024 * 1024;
 /// Credit assumed until the server says otherwise (the C server's default).
@@ -207,7 +209,13 @@ impl Handle {
 
     /// Send bytes on a stream, waiting for credit when the server is behind.
     pub fn send(&self, stream: u32, data: &[u8]) -> io::Result<()> {
-        for chunk in data.chunks(MAX_CHUNK) {
+        self.send_with(stream, data, MAX_CHUNK)
+    }
+
+    /// Like [`Handle::send`] with a choice of packet size. `max_packet` is clamped to 1 MiB, the
+    /// most a server accepts by default.
+    pub fn send_with(&self, stream: u32, data: &[u8], max_packet: usize) -> io::Result<()> {
+        for chunk in data.chunks(max_packet.clamp(1, MAX_PACKET)) {
             self.shared.take_credit(stream)?;
             self.shared.send_packet(ptype::DATA, stream, chunk)?;
         }
@@ -249,33 +257,78 @@ impl Reader {
 
     /// The next thing the server sent. Errors once the connection is gone.
     pub fn next_event(&mut self) -> io::Result<Event> {
-        let result = self.next_event_inner();
-        if let Err(e) = &result {
-            // a read timeout leaves the connection usable
-            if !matches!(
-                e.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-            ) {
-                self.shared.mark_dead();
-            }
-        }
-        result
+        Ok(match self.next_ref()? {
+            EventRef::Data { stream, data } => Event::Data {
+                stream,
+                data: data.to_vec(),
+            },
+            EventRef::Continue { stream, remaining } => Event::Continue { stream, remaining },
+            EventRef::Close { stream, reason } => Event::Close { stream, reason },
+        })
     }
 
-    fn next_event_inner(&mut self) -> io::Result<Event> {
+    /// Like [`Reader::next_event`] but the payload is borrowed from the read buffer, so nothing is
+    /// copied. The borrow ends at the next call. This is the cheap way to drain a busy stream.
+    pub fn next_ref(&mut self) -> io::Result<EventRef<'_>> {
+        let desc = match self.next_desc() {
+            Ok(d) => d,
+            Err(e) => {
+                // a read timeout leaves the connection usable
+                if !matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) {
+                    self.shared.mark_dead();
+                }
+                return Err(e);
+            }
+        };
+        Ok(match desc {
+            Desc::Data {
+                stream,
+                from,
+                to,
+                joined,
+            } => EventRef::Data {
+                stream,
+                data: if joined {
+                    &self.message[from..to]
+                } else {
+                    &self.buf[from..to]
+                },
+            },
+            Desc::Continue { stream, remaining } => EventRef::Continue { stream, remaining },
+            Desc::Close { stream, reason } => EventRef::Close { stream, reason },
+        })
+    }
+
+    /// Find the next event and describe it without borrowing the buffers.
+    fn next_desc(&mut self) -> io::Result<Desc> {
         loop {
-            let mut msg = self.next_message()?;
-            let packet = wisp::parse(&msg).map_err(proto_err)?;
+            let found = self.locate()?;
+            let (bytes, joined) = match found {
+                Found::InBuf(from, to) => (&self.buf[from..to], false),
+                Found::Joined => (&self.message[..], true),
+            };
+            let packet = wisp::parse(bytes).map_err(proto_err)?;
             let (kind, stream) = (packet.ptype, packet.stream_id);
             match kind {
                 ptype::DATA => {
-                    msg.drain(..HEADER_LEN);
-                    return Ok(Event::Data { stream, data: msg });
+                    let (from, to) = match found {
+                        Found::InBuf(from, to) => (from + HEADER_LEN, to),
+                        Found::Joined => (HEADER_LEN, self.message.len()),
+                    };
+                    return Ok(Desc::Data {
+                        stream,
+                        from,
+                        to,
+                        joined,
+                    });
                 }
                 ptype::CONTINUE if packet.payload.len() >= 4 => {
                     let remaining = wisp::le32(packet.payload);
                     self.apply_continue(stream, remaining);
-                    return Ok(Event::Continue { stream, remaining });
+                    return Ok(Desc::Continue { stream, remaining });
                 }
                 ptype::CLOSE => {
                     let reason = packet
@@ -285,7 +338,7 @@ impl Reader {
                         .unwrap_or(wisp::close::UNKNOWN);
                     lock(&self.shared.credits).streams.remove(&stream);
                     self.shared.credit_changed.notify_all();
-                    return Ok(Event::Close { stream, reason });
+                    return Ok(Desc::Close { stream, reason });
                 }
                 _ => {} // INFO after the handshake and unknown types are ignored
             }
@@ -323,8 +376,17 @@ impl Reader {
         Ok(())
     }
 
-    /// One whole binary message, with fragments joined and control frames answered.
+    /// One whole binary message as an owned copy (the handshake only).
     fn next_message(&mut self) -> io::Result<Vec<u8>> {
+        Ok(match self.locate()? {
+            Found::InBuf(from, to) => self.buf[from..to].to_vec(),
+            Found::Joined => std::mem::take(&mut self.message),
+        })
+    }
+
+    /// One whole binary message, with fragments joined and control frames answered. The common
+    /// case, a single unmasked frame, is left in place in the read buffer.
+    fn locate(&mut self) -> io::Result<Found> {
         loop {
             let head = match ws::parse_header(&self.buf[self.start..]) {
                 Ok(h) => h,
@@ -346,13 +408,14 @@ impl Reader {
                 continue;
             }
             let from = self.start + head.header_len;
-            let mut payload = self.buf[from..self.start + total].to_vec();
-            self.start += total;
-            if head.masked {
-                simd::unmask(&mut payload, head.mask, 0);
-            }
+            let to = self.start + total;
+            self.start = to;
             match head.opcode {
                 ws::opcode::PING => {
+                    let mut payload = self.buf[from..to].to_vec();
+                    if head.masked {
+                        simd::unmask(&mut payload, head.mask, 0);
+                    }
                     lock(&self.shared.writer).frame(ws::opcode::PONG, &[&payload])?
                 }
                 ws::opcode::PONG => {}
@@ -363,10 +426,17 @@ impl Reader {
                     ));
                 }
                 op => {
+                    if op != ws::opcode::CONTINUATION && head.fin && !head.masked {
+                        return Ok(Found::InBuf(from, to));
+                    }
                     if op != ws::opcode::CONTINUATION {
                         self.message.clear();
                     }
-                    self.message.extend_from_slice(&payload);
+                    let begin = self.message.len();
+                    self.message.extend_from_slice(&self.buf[from..to]);
+                    if head.masked {
+                        simd::unmask(&mut self.message[begin..], head.mask, 0);
+                    }
                     if self.message.len() as u64 > MAX_MESSAGE {
                         return Err(err(
                             io::ErrorKind::InvalidData,
@@ -374,12 +444,47 @@ impl Reader {
                         ));
                     }
                     if head.fin {
-                        return Ok(std::mem::take(&mut self.message));
+                        return Ok(Found::Joined);
                     }
                 }
             }
         }
     }
+}
+
+/// Where a complete message sits.
+#[derive(Clone, Copy)]
+enum Found {
+    /// `buf[from..to]`.
+    InBuf(usize, usize),
+    /// In `Reader::message`, assembled from fragments.
+    Joined,
+}
+
+/// An event described by positions, so it can be turned into a borrow in one place.
+enum Desc {
+    Data {
+        stream: u32,
+        from: usize,
+        to: usize,
+        joined: bool,
+    },
+    Continue {
+        stream: u32,
+        remaining: u32,
+    },
+    Close {
+        stream: u32,
+        reason: u8,
+    },
+}
+
+/// [`Event`] with the payload borrowed from the reader's buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventRef<'a> {
+    Data { stream: u32, data: &'a [u8] },
+    Continue { stream: u32, remaining: u32 },
+    Close { stream: u32, reason: u8 },
 }
 
 /// Connect to a Wisp server and finish the handshake.
