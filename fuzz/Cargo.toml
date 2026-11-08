@@ -1,0 +1,82 @@
+[package]
+name = "holywisp-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Not part of the main workspace: it needs a nightly compiler and libFuzzer.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+holywisp-proto = { path = "../crates/holywisp-proto" }
+holywisp-config = { path = "../crates/holywisp-config" }
+holywisp-client = { path = "../crates/holywisp-client" }
+holywisp = { path = "../crates/holywisp" }
+
+[[bin]]
+name = "ws_header"
+path = "fuzz_targets/ws_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wisp_packet"
+path = "fuzz_targets/wisp_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_request"
+path = "fuzz_targets/http_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "unmask"
+path = "fuzz_targets/unmask.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proxy_handshake"
+path = "fuzz_targets/proxy_handshake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_text"
+path = "fuzz_targets/config_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "values"
+path = "fuzz_targets/values.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "policy"
+path = "fuzz_targets/policy.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client_url"
+path = "fuzz_targets/client_url.rs"
+test = false
+doc = false
+bench = false

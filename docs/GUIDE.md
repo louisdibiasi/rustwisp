@@ -317,6 +317,16 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+The code that reads bytes from the network is also fuzzed. The `fuzz/` folder holds libFuzzer targets for the WebSocket header, Wisp packets, the HTTP upgrade, the unmask routine (checked against a plain loop), the upstream proxy conversation, the config file and its small value types, the egress and client-address policy, and the client's address parser. It needs a nightly compiler and `cargo-fuzz`:
+
+```sh
+cargo install cargo-fuzz
+cd fuzz
+cargo +nightly fuzz run ws_header seeds/ws_header -- -max_total_time=60
+```
+
+The seeds in `fuzz/seeds/` give each target something realistic to start from. A crash is saved under `fuzz/artifacts/` and can be replayed with `cargo +nightly fuzz run <target> <file>`. The targets assert more than "does not panic": a header that parses must write back out and parse the same, a CONNECT must rebuild into the same bytes, and a request cannot make the server's reply carry extra header lines.
+
 Unsafe code is denied across the workspace. The two places that need it, the SIMD unmask and the thin Linux system-call layer, say why next to each block.
 
 The server is Linux-only because it uses epoll and splice directly. On Windows you can build and test the other crates; for the server, use WSL.

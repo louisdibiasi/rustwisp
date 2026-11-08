@@ -86,6 +86,13 @@ impl Handshake {
         let creds = credentials.map(|(u, p)| (u.as_bytes().to_vec(), p.as_bytes().to_vec()));
         match kind {
             ProxyKind::Socks5 => {
+                // The login fields carry a one-byte length each (RFC 1929).
+                if creds
+                    .as_ref()
+                    .is_some_and(|(u, p)| u.is_empty() || u.len() > 255 || p.len() > 255)
+                {
+                    return Err(close::NETWORK_ERROR);
+                }
                 let request = target.socks_request(port).ok_or(close::INVALID_INFO)?;
                 let greeting = if creds.is_some() {
                     vec![5, 2, 0, 2]
@@ -478,6 +485,27 @@ mod tests {
         let long = "a".repeat(254);
         assert!(Handshake::new(ProxyKind::Socks5, None, &long, 80).is_err());
         assert!(Handshake::new(ProxyKind::Http, None, "v6.example", 80).is_ok());
+    }
+
+    #[test]
+    fn socks5_logins_must_fit_a_one_byte_length() {
+        let long = "x".repeat(256);
+        let fits = "x".repeat(255);
+        for creds in [(long.as_str(), "p"), ("u", long.as_str()), ("", "p")] {
+            assert_eq!(
+                Handshake::new(ProxyKind::Socks5, Some(creds), "h.example", 80).err(),
+                Some(close::NETWORK_ERROR)
+            );
+        }
+        assert!(
+            Handshake::new(
+                ProxyKind::Socks5,
+                Some((fits.as_str(), fits.as_str())),
+                "h",
+                80
+            )
+            .is_ok()
+        );
     }
 
     #[test]

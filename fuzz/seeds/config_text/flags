@@ -1,0 +1,1 @@
+--port 7000 --allow-loopback --motd=hello --allow-udp off --proxy socks5://u:p@127.0.0.1:1080
