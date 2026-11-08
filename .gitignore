@@ -24,3 +24,6 @@ __pycache__/
 
 # Rust
 /target/
+
+# Default reputation store when a server is started from the repo root
+/data/
