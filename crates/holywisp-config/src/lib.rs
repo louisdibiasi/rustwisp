@@ -9,7 +9,7 @@ mod values;
 use std::collections::BTreeMap;
 use std::io;
 
-pub use values::{Cidr, HostList, PortSet, normalize_hostname};
+pub use values::{Cidr, HostList, PortSet, ProxyKind, ProxyUrl, normalize_hostname};
 use values::{MAX_CIDRS, MAX_DNS_SERVERS, MAX_STRING, MAX_TRUSTED_HEADERS, parse_bool};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -130,7 +130,7 @@ pub struct Config {
     pub reputation_enabled: bool,
     pub reputation: ReputationConfig,
 
-    pub proxy: String,
+    pub proxy: Option<ProxyUrl>,
     pub proxy_udp_direct: bool,
     pub dns_servers: Vec<String>,
     pub dns_ttl_s: u32,
@@ -209,7 +209,7 @@ impl Default for Config {
                 source_weights: BTreeMap::new(),
                 dest_weights: BTreeMap::new(),
             },
-            proxy: String::new(),
+            proxy: None,
             proxy_udp_direct: false,
             dns_servers: Vec::new(),
             dns_ttl_s: 120,
@@ -386,7 +386,16 @@ impl Config {
             "reputation-weight" => weight(key, v, &mut self.reputation.source_weights)?,
             "reputation-dest-weight" => weight(key, v, &mut self.reputation.dest_weights)?,
 
-            "proxy" => self.proxy = string(key, v)?,
+            "proxy" => {
+                self.proxy = if v.is_empty() {
+                    None
+                } else {
+                    Some(
+                        v.parse()
+                            .map_err(|e| format!("bad value for 'proxy': {e}"))?,
+                    )
+                };
+            }
             "proxy-udp" => {
                 self.proxy_udp_direct = match v {
                     "direct" => true,

@@ -191,6 +191,119 @@ impl FromStr for Cidr {
     }
 }
 
+/// Which protocol the upstream proxy speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyKind {
+    Socks5,
+    Http,
+}
+
+/// An upstream proxy for outbound TCP streams, from `proxy = socks5://user:pass@host:port`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProxyUrl {
+    pub kind: ProxyKind,
+    /// Host without IPv6 brackets.
+    pub host: String,
+    pub port: u16,
+    pub user: Option<String>,
+    pub pass: Option<String>,
+}
+
+impl std::fmt::Debug for ProxyUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyUrl")
+            .field("kind", &self.kind)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("user", &self.user)
+            .field("pass", &self.pass.as_ref().map(|_| "<hidden>"))
+            .finish()
+    }
+}
+
+/// Longest user name or password SOCKS5 can carry (a one-byte length).
+const MAX_PROXY_CRED: usize = 255;
+
+fn percent_decode(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = text.get(i + 1..i + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+impl FromStr for ProxyUrl {
+    type Err = String;
+
+    /// Errors never repeat the input, because it may hold a password.
+    fn from_str(text: &str) -> Result<Self, String> {
+        let (scheme, rest) = text
+            .split_once("://")
+            .ok_or("expected socks5://host:port or http://host:port")?;
+        let (kind, default_port) = match scheme {
+            "socks5" | "socks5h" => (ProxyKind::Socks5, 1080),
+            "http" => (ProxyKind::Http, 8080),
+            "https" => return Err("an https:// proxy is not supported (TLS to the proxy)".into()),
+            _ => return Err("proxy scheme must be socks5, socks5h or http".into()),
+        };
+        let authority = rest.split('/').next().unwrap_or(rest);
+        let (userinfo, hostport) = match authority.rsplit_once('@') {
+            Some((u, h)) => (Some(u), h),
+            None => (None, authority),
+        };
+        let (user, pass) = match userinfo {
+            None => (None, None),
+            Some(info) => {
+                let (u, p) = info.split_once(':').unwrap_or((info, ""));
+                let u = percent_decode(u).ok_or("bad escape in the proxy user name")?;
+                let p = percent_decode(p).ok_or("bad escape in the proxy password")?;
+                if u.is_empty() || u.len() > MAX_PROXY_CRED || p.len() > MAX_PROXY_CRED {
+                    return Err(
+                        "proxy user must be 1-255 bytes and the password at most 255".into(),
+                    );
+                }
+                (Some(u), Some(p))
+            }
+        };
+        let (host, port) = if let Some(inner) = hostport.strip_prefix('[') {
+            let end = inner
+                .find(']')
+                .ok_or("unterminated '[' in the proxy address")?;
+            let tail = &inner[end + 1..];
+            let port = match tail.strip_prefix(':') {
+                Some(p) => parse_port(p).ok_or("bad proxy port")?,
+                None if tail.is_empty() => default_port,
+                None => return Err("junk after the proxy IPv6 address".into()),
+            };
+            (&inner[..end], port)
+        } else {
+            match hostport.rsplit_once(':') {
+                Some((h, p)) => (h, parse_port(p).ok_or("bad proxy port")?),
+                None => (hostport, default_port),
+            }
+        };
+        if host.is_empty() || host.contains(char::is_whitespace) {
+            return Err("no host in the proxy address".into());
+        }
+        Ok(ProxyUrl {
+            kind,
+            host: host.to_string(),
+            port,
+            user,
+            pass,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,5 +403,49 @@ mod tests {
         ] {
             assert!(bad.parse::<Cidr>().is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn proxy_url_shapes() {
+        let p: ProxyUrl = "socks5://127.0.0.1:1081".parse().unwrap();
+        assert_eq!(
+            (p.kind, p.host.as_str(), p.port),
+            (ProxyKind::Socks5, "127.0.0.1", 1081)
+        );
+        assert!(p.user.is_none());
+        let p: ProxyUrl = "socks5h://bob:p%40ss@proxy.example".parse().unwrap();
+        assert_eq!(
+            (p.port, p.user.as_deref(), p.pass.as_deref()),
+            (1080, Some("bob"), Some("p@ss"))
+        );
+        let p: ProxyUrl = "http://[::1]:3128/".parse().unwrap();
+        assert_eq!(
+            (p.kind, p.host.as_str(), p.port),
+            (ProxyKind::Http, "::1", 3128)
+        );
+        let p: ProxyUrl = "http://h".parse().unwrap();
+        assert_eq!(p.port, 8080);
+    }
+
+    #[test]
+    fn proxy_url_errors_do_not_leak_the_password() {
+        for bad in [
+            "",
+            "host:1080",
+            "ftp://h",
+            "https://h",
+            "socks5://",
+            "socks5://:1080",
+            "socks5://h:0",
+            "socks5://h:x",
+            "socks5://u:%zz@h",
+            "socks5://[::1",
+        ] {
+            assert!(bad.parse::<ProxyUrl>().is_err(), "{bad:?}");
+        }
+        let e = "socks5://bob:hunter2@h:0".parse::<ProxyUrl>().unwrap_err();
+        assert!(!e.contains("hunter2"));
+        let p: ProxyUrl = "socks5://bob:hunter2@h".parse().unwrap();
+        assert!(!format!("{p:?}").contains("hunter2"));
     }
 }
