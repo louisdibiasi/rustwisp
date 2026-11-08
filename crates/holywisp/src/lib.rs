@@ -8,10 +8,14 @@ pub mod egress;
 pub mod filter;
 pub mod limits;
 pub mod pages;
+pub mod password;
+pub mod proxy;
 pub mod reputation;
 pub mod slab;
 pub mod stats;
 
+#[cfg(target_os = "linux")]
+mod auth;
 #[cfg(target_os = "linux")]
 mod conn;
 #[cfg(target_os = "linux")]

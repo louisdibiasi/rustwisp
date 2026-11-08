@@ -89,6 +89,10 @@ pub(crate) struct Link {
     pub handshake_done: bool,
     pub stream_confirm: bool,
     pub authenticated: bool,
+    /// A password check is running on the auth pool; its id.
+    pub auth_pending: Option<u64>,
+    /// `stream_confirm` from the INFO that started that check.
+    pub auth_confirm: bool,
     /// Remote reads are suspended because the client is not draining.
     pub paused: bool,
     pub pause_changed: bool,

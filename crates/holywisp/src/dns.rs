@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use holywisp_config::DnsOrder;
 
+use crate::auth::AuthDone;
 use crate::sys;
 
 #[derive(Debug)]
@@ -28,6 +29,7 @@ pub(crate) struct DnsDone {
 #[derive(Debug)]
 pub(crate) struct Mailbox {
     queue: Mutex<Vec<DnsDone>>,
+    auth: Mutex<Vec<AuthDone>>,
     wake: OwnedFd,
 }
 
@@ -35,6 +37,7 @@ impl Mailbox {
     pub(crate) fn new() -> std::io::Result<Arc<Mailbox>> {
         Ok(Arc::new(Mailbox {
             queue: Mutex::new(Vec::new()),
+            auth: Mutex::new(Vec::new()),
             wake: sys::wake_fd()?,
         }))
     }
@@ -52,6 +55,20 @@ impl Mailbox {
 
     pub(crate) fn take(&self) -> Vec<DnsDone> {
         self.queue
+            .lock()
+            .map(|mut q| std::mem::take(&mut *q))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn post_auth(&self, done: AuthDone) {
+        if let Ok(mut q) = self.auth.lock() {
+            q.push(done);
+        }
+        sys::wake(&self.wake);
+    }
+
+    pub(crate) fn take_auth(&self) -> Vec<AuthDone> {
+        self.auth
             .lock()
             .map(|mut q| std::mem::take(&mut *q))
             .unwrap_or_default()

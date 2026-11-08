@@ -10,9 +10,12 @@ use std::time::Duration;
 use holywisp_config::{Config, LogLevel};
 use holywisp_proto::wisp::HEADER_LEN;
 
+use crate::auth::AuthPool;
 use crate::dns::{Mailbox, Resolver};
 use crate::limits::{Bandwidth, Semaphore, Window};
 use crate::pages;
+use crate::password::{self, Scheme};
+use crate::proxy::Upstream;
 use crate::reputation::Reputation;
 use crate::stats::Stats;
 use crate::worker::{Shared, SpliceMode, Worker};
@@ -21,6 +24,11 @@ use crate::worker::{Shared, SpliceMode, Worker};
 pub fn validate(cfg: &Config) -> Result<(), String> {
     if cfg.max_message_size < 5 {
         return Err("max-message-size must be at least 5".into());
+    }
+    for u in &cfg.users {
+        if let Err(why) = password::scheme(&u.secret) {
+            return Err(format!("password-user '{}': {why}", u.name));
+        }
     }
     if cfg.password_required && cfg.users.is_empty() {
         return Err("password-required needs at least one password-user".into());
@@ -157,12 +165,24 @@ impl Server {
             cfg.dns_negative_ttl_s,
             cfg.dns_order,
         );
+        let upstream = cfg
+            .proxy
+            .as_ref()
+            .map(Upstream::resolve)
+            .transpose()
+            .map_err(|e| io::Error::new(e.kind(), format!("cannot resolve the proxy host: {e}")))?;
+        let hashed = cfg
+            .users
+            .iter()
+            .any(|u| password::scheme(&u.secret) != Ok(Scheme::Plain));
         let shared = Arc::new(Shared {
             window: ingress_window(&cfg),
             stats: Stats::new(),
             webclient,
             splice,
             resolver,
+            auth: AuthPool::new(if hashed { 2 } else { 0 }),
+            upstream,
             started: std::time::Instant::now(),
             conn_rate: (cfg.connections_limit_per_ip > 0 && cfg.connection_window_s > 0).then(
                 || {

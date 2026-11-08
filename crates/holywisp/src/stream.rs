@@ -16,6 +16,7 @@ use crate::egress;
 use crate::filter;
 use crate::limits::SigDet;
 use crate::link::{Link, Reg};
+use crate::proxy::{Handshake, Progress};
 use crate::reputation::{Event, Tier};
 use crate::stats::Stats;
 use crate::sys::{self, Errno, EventFlags};
@@ -33,8 +34,18 @@ const MAX_SIGDETS: usize = 64;
 pub(crate) enum SState {
     Resolving,
     Connecting,
+    /// Connected to the upstream proxy, negotiating the tunnel to the destination.
+    ProxyHandshake,
     Open,
     Closed,
+}
+
+/// An upstream proxy conversation in progress.
+#[derive(Debug)]
+pub(crate) struct ProxyHs {
+    machine: Handshake,
+    out: Vec<u8>,
+    sent: usize,
 }
 
 #[derive(Debug)]
@@ -62,6 +73,7 @@ pub(crate) struct Stream {
     pub syn_held: bool,
     /// `ip:port` of the first resolved address, the key for per-destination limits.
     pub dest: String,
+    pub hs: Option<Box<ProxyHs>>,
 }
 
 fn map_errno(e: Errno) -> u8 {
@@ -130,6 +142,7 @@ fn new_stream(cx: &mut Ctx, conn_tok: u64, id: u32, udp: bool, host: &str, port:
         bulk: false,
         syn_held: false,
         dest: String::new(),
+        hs: None,
     }
 }
 
@@ -144,6 +157,7 @@ pub(crate) fn close_stream(link: &mut Link, cx: &mut Ctx, s: &mut Stream, reason
     cx.slab.release(s.reg.token);
     Stats::dec(&cx.sh.stats.streams_active);
     s.out.clear();
+    s.hs = None;
     if send {
         link.send_close(cx, s.id, reason);
     }
@@ -159,6 +173,11 @@ fn release_syn(cx: &Ctx, s: &mut Stream) {
 /// Record a connect outcome against the SYN-flood signature. Returns true when it matched and the
 /// whole connection was closed.
 fn signature_record(link: &mut Link, cx: &Ctx, s: &Stream, ok: bool) -> bool {
+    // Through a proxy the TCP connect only reaches the proxy, which says nothing about the destination.
+    !proxied(cx, s) && signature_record_always(link, cx, s, ok)
+}
+
+fn signature_record_always(link: &mut Link, cx: &Ctx, s: &Stream, ok: bool) -> bool {
     let f = &cx.cfg().flood;
     if !f.enabled || !f.syn_signature_enabled || s.udp {
         return false;
@@ -232,6 +251,12 @@ fn update_events(cx: &Ctx, s: &mut Stream) -> bool {
     let mut want = EventFlags::empty();
     match s.state {
         SState::Connecting => want |= sys::OUT,
+        SState::ProxyHandshake => {
+            want |= sys::IN;
+            if s.hs.as_ref().is_some_and(|h| h.sent < h.out.len()) {
+                want |= sys::OUT;
+            }
+        }
         SState::Open => {
             if s.read_armed {
                 want |= sys::IN;
@@ -261,6 +286,10 @@ pub(crate) fn open(conn: &mut Conn, cx: &mut Ctx, id: u32, kind: u8, host: &str,
     let link = &mut conn.link;
     if port == 0 {
         link.send_close(cx, id, close::INVALID_INFO);
+        return;
+    }
+    if kind == stream_type::UDP && cx.sh.upstream.is_some() && !cx.cfg().proxy_udp_direct {
+        link.send_close(cx, id, close::BLOCKED);
         return;
     }
     if !filter::host_port_ok(cx.cfg(), host, port) {
@@ -300,7 +329,7 @@ fn open_literal(link: &mut Link, cx: &mut Ctx, s: &mut Stream, ip: IpAddr) {
     }
     s.addrs = vec![SocketAddr::new(ip, s.port)];
     if dest_policy(link, cx, s) {
-        connect_next(link, cx, s, Errno::HOSTUNREACH);
+        begin_connect(link, cx, s);
     }
 }
 
@@ -344,8 +373,19 @@ pub(crate) fn on_resolved(
     }
     s.serial = s.serial.wrapping_add(1);
     if dest_policy(link, cx, s) {
-        connect_next(link, cx, s, Errno::HOSTUNREACH);
+        begin_connect(link, cx, s);
     }
+}
+
+/// The destination passed every check: connect to it, or to the proxy that will reach it.
+fn begin_connect(link: &mut Link, cx: &mut Ctx, s: &mut Stream) {
+    if proxied(cx, s)
+        && let Some(up) = cx.sh.upstream.as_ref()
+    {
+        s.addrs = up.addrs.clone();
+        s.addr_idx = 0;
+    }
+    connect_next(link, cx, s, Errno::HOSTUNREACH);
 }
 
 /// Try the next resolved address.
@@ -378,7 +418,7 @@ fn connect_next(link: &mut Link, cx: &mut Ctx, s: &mut Stream, mut last: Errno) 
                 if signature_record(link, cx, s, true) {
                     return;
                 }
-                connected(link, cx, s);
+                tcp_up(link, cx, s);
                 return;
             }
             Err(Errno::INPROGRESS) => {
@@ -440,7 +480,143 @@ pub(crate) fn on_connect_timer(link: &mut Link, cx: &mut Ctx, s: &mut Stream, se
                 connect_next(link, cx, s, Errno::TIMEDOUT);
             }
         }
+        SState::ProxyHandshake => proxy_fail(link, cx, s, close::NO_RESPONSE),
         _ => {}
+    }
+}
+
+// ------------------------------------------------------------------------------------- upstream proxy
+
+/// Outbound TCP goes through the configured proxy; UDP never does.
+fn proxied(cx: &Ctx, s: &Stream) -> bool {
+    !s.udp && cx.sh.upstream.is_some()
+}
+
+/// The socket to the destination (or to the proxy) is up.
+fn tcp_up(link: &mut Link, cx: &mut Ctx, s: &mut Stream) {
+    if proxied(cx, s) {
+        start_proxy(link, cx, s);
+    } else {
+        connected(link, cx, s);
+    }
+}
+
+/// Send the proxy our request for this destination and wait for its answer.
+fn start_proxy(link: &mut Link, cx: &mut Ctx, s: &mut Stream) {
+    let Some(up) = cx.sh.upstream.as_ref() else {
+        return connected(link, cx, s);
+    };
+    let creds = up.cfg.user.as_deref().zip(up.cfg.pass.as_deref());
+    let (machine, first) = match Handshake::new(up.cfg.kind, creds, &s.host, s.port) {
+        Ok(started) => started,
+        Err(reason) => {
+            close_stream(link, cx, s, reason, true);
+            return;
+        }
+    };
+    s.hs = Some(Box::new(ProxyHs {
+        machine,
+        out: first,
+        sent: 0,
+    }));
+    s.state = SState::ProxyHandshake;
+    s.serial = s.serial.wrapping_add(1);
+    let t = Duration::from_millis(u64::from(cx.cfg().connect_timeout_ms.max(1)));
+    cx.add_timer(t, link.reg.token, s.id, s.serial, TimerKind::Connect);
+    proxy_write(link, cx, s);
+}
+
+fn proxy_fail(link: &mut Link, cx: &mut Ctx, s: &mut Stream, reason: u8) {
+    s.hs = None;
+    if !signature_record_always(link, cx, s, false) {
+        close_stream(link, cx, s, reason, true);
+    }
+}
+
+/// Push pending handshake bytes. Returns false when the stream was closed.
+fn proxy_write(link: &mut Link, cx: &mut Ctx, s: &mut Stream) -> bool {
+    loop {
+        let Some(hs) = s.hs.as_ref() else {
+            return true;
+        };
+        if hs.sent >= hs.out.len() {
+            break;
+        }
+        match send_remote(s, &hs.out[hs.sent..]) {
+            Ok(n) => {
+                if let Some(h) = s.hs.as_mut() {
+                    h.sent += n;
+                }
+            }
+            Err(Errno::INTR) => {}
+            Err(e) if sys::is_would_block(e) => break,
+            Err(e) => {
+                proxy_fail(link, cx, s, map_errno(e));
+                return false;
+            }
+        }
+    }
+    if !update_events(cx, s) {
+        proxy_fail(link, cx, s, close::NETWORK_ERROR);
+        return false;
+    }
+    true
+}
+
+fn proxy_event(link: &mut Link, cx: &mut Ctx, s: &mut Stream, flags: EventFlags) {
+    if flags.contains(sys::OUT) && !proxy_write(link, cx, s) {
+        return;
+    }
+    if flags.intersects(sys::IN | EventFlags::HUP | EventFlags::ERR) {
+        proxy_read(link, cx, s);
+    }
+}
+
+/// Read the proxy's answer. Only the bytes of the reply are taken off the socket; whatever the
+/// destination sent after it stays queued for the relay.
+fn proxy_read(link: &mut Link, cx: &mut Ctx, s: &mut Stream) {
+    let mut buf = [0u8; 512];
+    while s.state == SState::ProxyHandshake {
+        let Some(fd) = s.fd.as_ref() else { return };
+        let seen = match sys::peek(fd, &mut buf) {
+            Ok(0) => return proxy_fail(link, cx, s, close::NETWORK_ERROR),
+            Ok(n) => n,
+            Err(Errno::INTR) => continue,
+            Err(e) if sys::is_would_block(e) => return,
+            Err(e) => return proxy_fail(link, cx, s, map_errno(e)),
+        };
+        let Some(hs) = s.hs.as_mut() else { return };
+        let (used, progress) = hs.machine.feed(&buf[..seen]);
+        let used = used.min(seen);
+        if used > 0 {
+            let took = match s.fd.as_ref() {
+                Some(fd) => sys::recv(fd, &mut buf[..used]),
+                None => return,
+            };
+            if took != Ok(used) {
+                return proxy_fail(link, cx, s, close::NETWORK_ERROR);
+            }
+        }
+        match progress {
+            Progress::Wait => {}
+            Progress::Send(bytes) => {
+                if let Some(h) = s.hs.as_mut() {
+                    h.out = bytes;
+                    h.sent = 0;
+                }
+                if !proxy_write(link, cx, s) {
+                    return;
+                }
+            }
+            Progress::Done => {
+                s.hs = None;
+                if !signature_record_always(link, cx, s, true) {
+                    connected(link, cx, s);
+                }
+                return;
+            }
+            Progress::Fail(reason) => return proxy_fail(link, cx, s, reason),
+        }
     }
 }
 
@@ -467,7 +643,7 @@ pub(crate) fn on_event(link: &mut Link, cx: &mut Ctx, s: &mut Stream, flags: Eve
                 }
                 None => {
                     if !signature_record(link, cx, s, true) {
-                        connected(link, cx, s);
+                        tcp_up(link, cx, s);
                     }
                 }
             }
@@ -480,6 +656,7 @@ pub(crate) fn on_event(link: &mut Link, cx: &mut Ctx, s: &mut Stream, flags: Eve
                 read_remote(link, cx, s);
             }
         }
+        SState::ProxyHandshake => proxy_event(link, cx, s, flags),
         SState::Resolving | SState::Closed => {}
     }
 }

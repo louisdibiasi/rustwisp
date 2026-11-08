@@ -12,10 +12,12 @@ use std::time::Duration;
 use holywisp_proto::wisp::{self, close, ext, ptype, stream_type};
 use holywisp_proto::{ProtoError, http, simd, ws};
 
+use crate::auth::AuthDone;
 use crate::buf::Queue;
 use crate::dns::DnsDone;
 use crate::filter;
 use crate::link::{Link, Reg, State};
+use crate::password::{self, Scheme};
 use crate::reputation::{Event, Tier};
 use crate::stats::Stats;
 use crate::stream::{self, SState, Stream};
@@ -41,6 +43,13 @@ impl Hasher for IdHasher {
     fn write_u32(&mut self, n: u32) {
         self.0 = u64::from(n).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     }
+}
+
+/// How a login attempt stands.
+enum PwCheck {
+    Ok,
+    Bad,
+    Pending,
 }
 
 pub(crate) type StreamMap = HashMap<u32, Stream, BuildHasherDefault<IdHasher>>;
@@ -75,6 +84,8 @@ impl Conn {
                 handshake_done: false,
                 stream_confirm: false,
                 authenticated: false,
+                auth_pending: None,
+                auth_confirm: false,
                 paused: false,
                 pause_changed: false,
                 throttled: false,
@@ -495,23 +506,47 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
         self.link.send_continue(cx, 0, cx.sh.window);
     }
 
-    fn password_ok(cx: &Ctx, user: &[u8], pass: &[u8]) -> bool {
+    /// Check a login. Plain secrets are compared right here; hashed ones go to the auth pool and the
+    /// answer arrives later through `on_auth`.
+    fn check_password(&mut self, cx: &Ctx, user: &[u8], pass: &[u8]) -> PwCheck {
         let Ok(user) = std::str::from_utf8(user) else {
-            return false;
+            return PwCheck::Bad;
         };
-        let Some(u) = cx.cfg().users.iter().find(|u| u.name == user) else {
-            return false;
+        let users = &cx.cfg().users;
+        let (secret, force_fail) = match users.iter().find(|u| u.name == user) {
+            Some(u) => (u.secret.as_str(), false),
+            // An unknown name still costs a hash when hashes are in use, so the time it takes does
+            // not reveal which names exist.
+            None => match users
+                .iter()
+                .find(|u| password::scheme(&u.secret) != Ok(Scheme::Plain))
+            {
+                Some(h) => (h.secret.as_str(), true),
+                None => return PwCheck::Bad,
+            },
         };
-        // crypt(3) hashes are not supported yet: they never match.
-        if u.secret.starts_with('$') {
-            return false;
+        if password::scheme(secret) == Ok(Scheme::Plain) {
+            let ok = !force_fail && password::verify_plain(secret, pass);
+            return if ok { PwCheck::Ok } else { PwCheck::Bad };
         }
-        let stored = u.secret.as_bytes();
-        let mut diff = u8::from(stored.len() != pass.len());
-        for (i, &b) in pass.iter().enumerate() {
-            diff |= b ^ stored.get(i).copied().unwrap_or(0);
+        match cx
+            .sh
+            .auth
+            .submit(&cx.mailbox, self.link.reg.token, secret, pass, force_fail)
+        {
+            Some(id) => {
+                self.link.auth_pending = Some(id);
+                PwCheck::Pending
+            }
+            None => PwCheck::Bad,
         }
-        diff == 0
+    }
+
+    fn auth_failed(&mut self, cx: &Ctx, reason: u8) {
+        Stats::inc(&cx.sh.stats.auth_failures);
+        self.link.rep_source(cx, Event::AuthFailure);
+        self.link.send_close(cx, 0, reason);
+        self.link.close();
     }
 
     fn handle_info(&mut self, cx: &Ctx, p: &wisp::Packet<'_>) {
@@ -528,24 +563,38 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
             && info.has_password
             && let (Some(u), Some(pw)) = (info.user, info.pass)
         {
-            if !Self::password_ok(cx, u, pw) {
-                Stats::inc(&cx.sh.stats.auth_failures);
-                self.link.rep_source(cx, Event::AuthFailure);
-                self.link.send_close(cx, 0, close::AUTH_BAD_PASSWORD);
-                self.link.close();
-                return;
+            match self.check_password(cx, u, pw) {
+                PwCheck::Ok => self.link.authenticated = true,
+                PwCheck::Bad => return self.auth_failed(cx, close::AUTH_BAD_PASSWORD),
+                PwCheck::Pending => {
+                    self.link.auth_confirm = info.has_stream_confirm;
+                    return;
+                }
             }
-            self.link.authenticated = true;
         }
-        if c.password_required && !self.link.authenticated {
-            Stats::inc(&cx.sh.stats.auth_failures);
-            self.link.rep_source(cx, Event::AuthFailure);
-            self.link.send_close(cx, 0, close::AUTH_REQUIRED);
-            self.link.close();
+        self.finish_info(cx, info.has_stream_confirm);
+    }
+
+    fn finish_info(&mut self, cx: &Ctx, stream_confirm: bool) {
+        if cx.cfg().password_required && !self.link.authenticated {
+            return self.auth_failed(cx, close::AUTH_REQUIRED);
+        }
+        self.link.stream_confirm = stream_confirm;
+        self.handshake_done(cx);
+    }
+
+    /// A hashed password finished checking.
+    pub(crate) fn on_auth(&mut self, cx: &mut Ctx, done: AuthDone) {
+        if self.link.auth_pending != Some(done.id) || self.link.closing {
             return;
         }
-        self.link.stream_confirm = info.has_stream_confirm;
-        self.handshake_done(cx);
+        self.link.auth_pending = None;
+        if !done.ok {
+            return self.auth_failed(cx, close::AUTH_BAD_PASSWORD);
+        }
+        self.link.authenticated = true;
+        let confirm = self.link.auth_confirm;
+        self.finish_info(cx, confirm);
     }
 
     fn handle_connect(&mut self, cx: &mut Ctx, p: &wisp::Packet<'_>) {
@@ -611,7 +660,9 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
         };
         if self.link.is_v2 && !self.link.handshake_done {
             if p.ptype == ptype::INFO && p.stream_id == 0 {
-                self.handle_info(cx, &p);
+                if self.link.auth_pending.is_none() {
+                    self.handle_info(cx, &p);
+                }
             } else if p.ptype == ptype::CLOSE && p.stream_id == 0 {
                 self.link.close();
             }

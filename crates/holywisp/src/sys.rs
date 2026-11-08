@@ -191,6 +191,12 @@ pub fn recv(fd: impl AsFd, buf: &mut [u8]) -> Res<usize> {
     Ok(n)
 }
 
+/// Look at the next bytes without taking them off the socket.
+pub fn peek(fd: impl AsFd, buf: &mut [u8]) -> Res<usize> {
+    let (n, _) = rustix::net::recv(fd, buf, RecvFlags::PEEK)?;
+    Ok(n)
+}
+
 pub fn send(fd: impl AsFd, buf: &[u8]) -> Res<usize> {
     rustix::net::send(fd, buf, SendFlags::NOSIGNAL | SendFlags::DONTWAIT)
 }

@@ -11,9 +11,11 @@ use std::time::{Duration, Instant};
 use holywisp_config::Config;
 use rustix::event::epoll::Event;
 
+use crate::auth::AuthPool;
 use crate::conn::Conn;
 use crate::dns::{DnsDone, Mailbox, Resolver};
 use crate::limits::{Bandwidth, Semaphore, Window};
+use crate::proxy::Upstream;
 use crate::reputation::Reputation;
 use crate::slab::Slab;
 use crate::stats::Stats;
@@ -47,6 +49,9 @@ pub(crate) struct Shared {
     pub webclient: Vec<u8>,
     pub splice: SpliceMode,
     pub resolver: Resolver,
+    pub auth: AuthPool,
+    /// The upstream proxy for outbound TCP, when one is configured.
+    pub upstream: Option<Upstream>,
     pub started: Instant,
     pub conn_rate: Option<Window>,
     pub per_source: Option<Window>,
@@ -275,6 +280,9 @@ impl Worker {
         let done: Vec<DnsDone> = self.cx.mailbox.take();
         for d in done {
             self.with_conn(d.conn, |c, cx| c.on_resolved(cx, d));
+        }
+        for a in self.cx.mailbox.take_auth() {
+            self.with_conn(a.conn, |c, cx| c.on_auth(cx, a));
         }
     }
 

@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 holywisp-proto = { path = "../holywisp-proto" }
 holywisp-config = { path = "../holywisp-config" }
+pwhash = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
