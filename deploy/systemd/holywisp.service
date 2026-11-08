@@ -7,7 +7,7 @@
 # the server does not need. Each directive is load-bearing; review it before relaxing it.
 [Unit]
 Description=holyWisp Wisp server
-Documentation=https://github.com/Fracital/holyWisp
+Documentation=https://github.com/louisdibiasi/holyWisp-rust
 After=network-online.target
 Wants=network-online.target
 
@@ -19,7 +19,6 @@ Group=wisp
 # Config and state. /etc/holywisp/holywisp.conf is root:wisp 0640 (it may hold password hashes, so
 # it is not world-readable). The reputation store lives under /var/lib/holywisp.
 ExecStart=/usr/bin/holywisp --config /etc/holywisp/holywisp.conf
-ExecReload=/bin/kill -HUP $MAINPID
 
 # A relay legitimately opens many sockets; raise the fd ceiling but keep it finite.
 LimitNOFILE=262144
