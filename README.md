@@ -8,6 +8,7 @@ It speaks Wisp v1 and v2, so existing clients such as wisp-js and the browser cl
 
 - `holywisp`, the server. One epoll loop per worker thread, `SO_REUSEPORT`, per-stream flow control, `/health` and `/stats`, and the built-in browser client on `GET /`.
 - `holywisp-cli`, a netcat that goes through a Wisp server.
+- A one-file browser client (`web/index.html`). The server serves it on `GET /`, and it can be published as a static page that works with any Wisp server.
 - `holywisp-bench`, a benchmark tool that compares servers on speed, latency and CPU cost per byte.
 - `holywisp-client`, the Rust library behind the CLI, if you want to talk to a Wisp server from your own program.
 - Egress rules that deny by default: no loopback, private ranges or literal IPs unless you turn them on, and the check runs on the addresses a name resolves to, not just the name.

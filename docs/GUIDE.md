@@ -13,12 +13,13 @@ This guide covers building the server, running it, configuring it, putting it on
 7. [Behind a reverse proxy](#behind-a-reverse-proxy)
 8. [Running under systemd](#running-under-systemd)
 9. [Health and stats](#health-and-stats)
-10. [The command line client](#the-command-line-client)
-11. [Using the library](#using-the-library)
-12. [Close reasons](#close-reasons)
-13. [Troubleshooting](#troubleshooting)
-14. [Benchmarking](#benchmarking)
-15. [Working on the code](#working-on-the-code)
+10. [The web client](#the-web-client)
+11. [The command line client](#the-command-line-client)
+12. [Using the library](#using-the-library)
+13. [Close reasons](#close-reasons)
+14. [Troubleshooting](#troubleshooting)
+15. [Benchmarking](#benchmarking)
+16. [Working on the code](#working-on-the-code)
 
 ## Build
 
@@ -177,6 +178,18 @@ Check it with `systemctl status holywisp` and `journalctl -u holywisp`.
 `GET /health` returns `{"status":"ok"}`, good for a load balancer check. `GET /stats` returns counters as JSON: uptime, connections, streams, bytes in and out, and how many attempts were refused, blocked or throttled.
 
 Both are plain HTTP on the same port. If the server is reachable from the internet, think about whether you want `/stats` public; the simplest answer is to block that path in the reverse proxy.
+
+## The web client
+
+A small client lives in `web/index.html`: one file, no build step, nothing loaded from other sites. It does two jobs.
+
+The server hands it out on `GET /`, and there it defaults to its own address, so opening `http://your-server:6001/` is enough to try the server from a browser. Set `serve-webclient = off` to turn that off, or `webclient-wisp-url` to make the page default to a different server.
+
+The same file can also be published as a static page, for example on GitHub Pages, where it works with any Wisp server you give it. The repository has a workflow for that in `.github/workflows/pages.yml`; it publishes the `web/` folder whenever it changes. A page on Pages is served over HTTPS, so the browser will only let it talk to `wss://` servers (or `ws://localhost`). Put TLS in front of your server, as described under [Behind a reverse proxy](#behind-a-reverse-proxy).
+
+What the page does: it connects with Wisp v1 or v2, shows the server's message of the day, logs in when the server asks for a password, and then either fetches an `http://` page through the server or sends raw text to any host and port. The protocol log shows every packet. **Copy link** puts the addresses into the page's URL fragment so a setup can be shared; the password is never saved or put in a link. Fields are remembered in the browser's local storage between visits.
+
+It cannot do TLS, so it only fetches plain `http://` pages. That is a limit of running in a browser tab without a TLS library, not of the server.
 
 ## The command line client
 

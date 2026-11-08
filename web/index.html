@@ -1,0 +1,732 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="color-scheme" content="light dark" />
+		<title>holyWisp client</title>
+		<link
+			rel="icon"
+			href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f766e'/%3E%3Cpath d='M6 20c3-8 6-8 10 0s7 8 10 0' fill='none' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E"
+		/>
+		<style>
+			:root {
+				--bg: #f4f3ee;
+				--surface: #ffffff;
+				--sunken: #ecebe4;
+				--ink: #1c2026;
+				--muted: #667080;
+				--line: #dedcd3;
+				--accent: #0f766e;
+				--accent-ink: #ffffff;
+				--ok: #157f4b;
+				--bad: #b42318;
+				--warn: #8a5300;
+				--mono: ui-monospace, 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace;
+				--sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+				--gap: 16px;
+			}
+			@media (prefers-color-scheme: dark) {
+				:root {
+					--bg: #14171c;
+					--surface: #1c2027;
+					--sunken: #11141a;
+					--ink: #e6e8ec;
+					--muted: #98a2b0;
+					--line: #2a303a;
+					--accent: #5eead4;
+					--accent-ink: #072320;
+					--ok: #6ee7a0;
+					--bad: #ff8b7b;
+					--warn: #f2b660;
+				}
+			}
+			* {
+				box-sizing: border-box;
+			}
+			body {
+				margin: 0;
+				background: var(--bg);
+				color: var(--ink);
+				font: 15px/1.5 var(--sans);
+			}
+			main {
+				max-width: 760px;
+				margin: 0 auto;
+				padding: 32px var(--gap) 64px;
+			}
+			header {
+				display: flex;
+				align-items: baseline;
+				justify-content: space-between;
+				gap: var(--gap);
+				margin-bottom: 24px;
+			}
+			h1 {
+				margin: 0;
+				font-size: 26px;
+				letter-spacing: -0.02em;
+			}
+			h1 span {
+				color: var(--accent);
+			}
+			.tag {
+				color: var(--muted);
+				font-size: 13px;
+			}
+			h2 {
+				margin: 28px 0 10px;
+				font-size: 12px;
+				font-weight: 600;
+				letter-spacing: 0.09em;
+				text-transform: uppercase;
+				color: var(--muted);
+			}
+			.card {
+				background: var(--surface);
+				border-radius: 14px;
+				padding: 18px;
+				display: grid;
+				gap: 14px;
+				box-shadow: 0 1px 0 var(--line), 0 8px 24px -18px rgba(0, 0, 0, 0.35);
+			}
+			.pair {
+				display: grid;
+				grid-template-columns: 1fr 1fr;
+				gap: 14px;
+			}
+			@media (max-width: 560px) {
+				.pair {
+					grid-template-columns: 1fr;
+				}
+			}
+			label {
+				display: grid;
+				gap: 6px;
+				font-size: 13px;
+				color: var(--muted);
+			}
+			input[type='text'],
+			input[type='password'],
+			select,
+			textarea {
+				width: 100%;
+				font: 14px var(--mono);
+				color: var(--ink);
+				background: var(--sunken);
+				border: 1px solid transparent;
+				border-radius: 9px;
+				padding: 10px 12px;
+			}
+			select {
+				font-family: var(--sans);
+			}
+			input:focus-visible,
+			select:focus-visible,
+			textarea:focus-visible,
+			button:focus-visible {
+				outline: 2px solid var(--accent);
+				outline-offset: 2px;
+			}
+			.note {
+				margin: 0;
+				font-size: 12.5px;
+				color: var(--muted);
+			}
+			.note.warn {
+				color: var(--warn);
+			}
+			.row {
+				display: flex;
+				flex-wrap: wrap;
+				gap: 10px;
+				align-items: center;
+			}
+			button {
+				font: 600 14px var(--sans);
+				border: 0;
+				border-radius: 9px;
+				padding: 10px 18px;
+				cursor: pointer;
+				color: var(--ink);
+				background: var(--sunken);
+				transition: transform 0.08s ease, opacity 0.15s ease;
+			}
+			button.primary {
+				background: var(--accent);
+				color: var(--accent-ink);
+			}
+			button:active:not(:disabled) {
+				transform: translateY(1px);
+			}
+			button:disabled {
+				opacity: 0.45;
+				cursor: default;
+			}
+			.status {
+				display: flex;
+				flex-wrap: wrap;
+				gap: 6px 22px;
+				font: 12.5px var(--mono);
+				color: var(--muted);
+				padding: 4px 2px;
+			}
+			.status b {
+				color: var(--ink);
+				font-weight: 600;
+			}
+			.dot {
+				display: inline-block;
+				width: 9px;
+				height: 9px;
+				border-radius: 50%;
+				margin-right: 6px;
+				background: var(--muted);
+			}
+			.dot.on {
+				background: var(--ok);
+			}
+			.dot.bad {
+				background: var(--bad);
+			}
+			.dot.busy {
+				background: var(--warn);
+			}
+			textarea {
+				min-height: 190px;
+				resize: vertical;
+				white-space: pre-wrap;
+				word-break: break-word;
+				font-size: 12.5px;
+				line-height: 1.5;
+			}
+			#log {
+				min-height: 130px;
+				color: var(--muted);
+			}
+			.hidden {
+				display: none !important;
+			}
+			.check {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+				font-size: 13px;
+			}
+			footer {
+				margin-top: 40px;
+				font-size: 12.5px;
+				color: var(--muted);
+			}
+			a {
+				color: var(--accent);
+			}
+			@media (prefers-reduced-motion: reduce) {
+				button {
+					transition: none;
+				}
+			}
+		</style>
+	</head>
+	<body>
+		<main>
+			<header>
+				<h1>holy<span>Wisp</span></h1>
+				<span class="tag">a Wisp client in one page</span>
+			</header>
+
+			<h2>Server</h2>
+			<form class="card" id="form" autocomplete="off">
+				<label>
+					Wisp server address
+					<input
+						id="wisp"
+						type="text"
+						spellcheck="false"
+						placeholder="wss://wisp.example.com/"
+					/>
+				</label>
+				<p class="note warn hidden" id="mixed">
+					This page is served over HTTPS, so the browser will refuse a plain
+					<code>ws://</code> address. Use <code>wss://</code>, or
+					<code>ws://localhost</code> for a server on this machine.
+				</p>
+				<div class="pair">
+					<label>
+						Protocol
+						<select id="version">
+							<option value="2">Wisp v2 (login, message of the day)</option>
+							<option value="1">Wisp v1</option>
+						</select>
+					</label>
+					<label>
+						Request
+						<select id="mode">
+							<option value="http">HTTP GET</option>
+							<option value="raw">Raw TCP text</option>
+						</select>
+					</label>
+				</div>
+				<div class="pair" id="creds">
+					<label>
+						User name
+						<input id="user" type="text" spellcheck="false" autocomplete="off" />
+					</label>
+					<label>
+						Password
+						<input id="pass" type="password" autocomplete="off" />
+					</label>
+				</div>
+				<p class="note" id="credsnote">
+					Only sent if the server asks for a login. The password is never saved or put in a link.
+				</p>
+
+				<div id="httpbox">
+					<label>
+						Page to fetch
+						<input
+							id="target"
+							type="text"
+							spellcheck="false"
+							value="http://example.com/"
+						/>
+					</label>
+					<p class="note">
+						The server relays a plain <code>http://</code> request. This page cannot do TLS itself.
+					</p>
+				</div>
+				<div id="rawbox" class="hidden">
+					<div class="pair">
+						<label>
+							Host
+							<input id="rawhost" type="text" spellcheck="false" value="example.com" />
+						</label>
+						<label>
+							Port
+							<input id="rawport" type="text" inputmode="numeric" value="80" />
+						</label>
+					</div>
+					<label style="margin-top: 14px">
+						Text to send
+						<textarea id="rawtext" style="min-height: 90px" spellcheck="false">GET / HTTP/1.0
+
+</textarea
+						>
+					</label>
+					<p class="note">Line endings are sent as CRLF.</p>
+				</div>
+
+				<div class="row">
+					<button class="primary" id="go" type="submit">Connect</button>
+					<button id="stop" type="button" disabled>Disconnect</button>
+					<button id="clear" type="button">Clear</button>
+					<button id="share" type="button">Copy link</button>
+				</div>
+			</form>
+
+			<h2>Status</h2>
+			<div class="status" role="status" aria-live="polite">
+				<span><span class="dot" id="dot"></span><b id="state">idle</b></span>
+				<span>version <b id="ver">-</b></span>
+				<span>window <b id="win">-</b></span>
+				<span>in / out <b id="bytes">0 / 0</b></span>
+			</div>
+			<p class="note" id="motd"></p>
+
+			<h2>Response <span id="respcount"></span></h2>
+			<textarea id="resp" readonly aria-label="Response"></textarea>
+
+			<h2>
+				Protocol log
+				<label class="check" style="display: inline-flex; margin-left: 10px">
+					<input type="checkbox" id="showlog" checked /> show
+				</label>
+			</h2>
+			<textarea id="log" readonly aria-label="Protocol log"></textarea>
+
+			<footer>
+				A rewrite of the holyWisp client page for
+				<a href="https://github.com/louisdibiasi/holyWisp-rust">holyWisp-rust</a>. It works with any
+				server that speaks the <a href="https://github.com/MercuryWorkshop/wisp-protocol">Wisp protocol</a>.
+				Nothing you type leaves your browser except to the server you name.
+			</footer>
+		</main>
+
+		<script>
+			'use strict';
+
+			const PKT = { CONNECT: 1, DATA: 2, CONTINUE: 3, CLOSE: 4, INFO: 5 };
+			const EXT = { UDP: 1, PASSWORD: 2, MOTD: 4 };
+			const REASONS = {
+				0x01: 'unknown',
+				0x02: 'closed normally',
+				0x03: 'network error',
+				0x04: 'incompatible protocol version',
+				0x41: 'invalid request',
+				0x42: 'destination unreachable',
+				0x43: 'destination did not answer',
+				0x44: 'destination refused the connection',
+				0x47: 'transfer timed out',
+				0x48: 'blocked by the server',
+				0x49: 'too much data queued',
+				0x81: 'client error',
+				0xc0: 'wrong user name or password',
+				0xc1: 'bad signature',
+				0xc2: 'a login is required',
+			};
+			const typeName = (t) => ({ 1: 'CONNECT', 2: 'DATA', 3: 'CONTINUE', 4: 'CLOSE', 5: 'INFO' })[t] || '0x' + t.toString(16);
+			const enc = new TextEncoder();
+			const dec = new TextDecoder();
+
+			class WispClient {
+				constructor(url, o) {
+					this.url = url;
+					this.v2 = o.v2;
+					this.creds = o.creds;
+					this.on = o;
+					this.ready = false;
+					this.nextId = 1;
+				}
+
+				connect() {
+					this.on.log('info', `connecting to ${this.url} as Wisp v${this.v2 ? 2 : 1}`);
+					let ws;
+					try {
+						ws = this.v2 ? new WebSocket(this.url, 'wisp-v2') : new WebSocket(this.url);
+					} catch (e) {
+						this.on.log('err', `cannot open that address: ${e.message}`);
+						this.on.state('error');
+						return;
+					}
+					ws.binaryType = 'arraybuffer';
+					ws.onopen = () => this.on.log('info', 'WebSocket open');
+					ws.onmessage = (ev) => this.frame(new Uint8Array(ev.data));
+					ws.onerror = () => this.on.log('err', 'WebSocket error: is the server reachable at that address?');
+					ws.onclose = (ev) => {
+						this.ready = false;
+						this.on.log('info', `WebSocket closed (code ${ev.code})`);
+						this.on.state(this.failed ? 'error' : 'closed');
+					};
+					this.ws = ws;
+				}
+
+				close() {
+					if (this.ws && this.ws.readyState <= 1) this.ws.close();
+				}
+
+				send(type, id, payload = new Uint8Array(0)) {
+					const buf = new Uint8Array(5 + payload.length);
+					buf[0] = type;
+					new DataView(buf.buffer).setUint32(1, id, true);
+					buf.set(payload, 5);
+					this.ws.send(buf);
+					this.on.log('tx', `${typeName(type)} stream=${id} len=${payload.length}`);
+				}
+
+				frame(buf) {
+					if (buf.length < 5) return;
+					const type = buf[0];
+					const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+					const id = dv.getUint32(1, true);
+					const body = buf.subarray(5);
+					let extra = '';
+					if (type === PKT.CLOSE) extra = ` reason=${REASONS[body[0]] || '0x' + (body[0] || 0).toString(16)}`;
+					if (type === PKT.CONTINUE && body.length >= 4) extra = ` window=${dv.getUint32(5, true)}`;
+					this.on.log('rx', `${typeName(type)} stream=${id} len=${body.length}${extra}`);
+
+					if (type === PKT.INFO && id === 0) return this.serverInfo(body);
+					if (type === PKT.CONTINUE && id === 0 && body.length >= 4) {
+						if (!this.ready) {
+							this.ready = true;
+							this.on.state('ready', { ver: this.v2 ? 'v2' : 'v1', win: dv.getUint32(5, true) });
+						}
+						return;
+					}
+					if (type === PKT.DATA) this.on.data(id, body);
+					if (type === PKT.CLOSE) {
+						if (id === 0) {
+							this.failed = true;
+							this.on.log('err', `the server ended the session: ${REASONS[body[0]] || body[0]}`);
+						}
+						this.on.close(id, body[0]);
+					}
+				}
+
+				/** Wisp v2: read the server's INFO, answer with ours, with a login when one is wanted. */
+				serverInfo(body) {
+					let motd = '';
+					let needsLogin = false;
+					let at = 2;
+					while (at + 5 <= body.length) {
+						const id = body[at];
+						const len = new DataView(body.buffer, body.byteOffset + at + 1, 4).getUint32(0, true);
+						const meta = body.subarray(at + 5, at + 5 + len);
+						if (id === EXT.MOTD) motd = dec.decode(meta);
+						if (id === EXT.PASSWORD && meta.length === 1) needsLogin = meta[0] !== 0;
+						at += 5 + len;
+					}
+					if (motd) this.on.motd(motd);
+					const parts = [new Uint8Array([2, 0])];
+					const { user, pass } = this.creds;
+					if (user) {
+						const u = enc.encode(user);
+						const p = enc.encode(pass);
+						const meta = new Uint8Array(3 + u.length + p.length);
+						meta[0] = u.length;
+						new DataView(meta.buffer).setUint16(1, p.length, true);
+						meta.set(u, 3);
+						meta.set(p, 3 + u.length);
+						const ext = new Uint8Array(5 + meta.length);
+						ext[0] = EXT.PASSWORD;
+						new DataView(ext.buffer).setUint32(1, meta.length, true);
+						ext.set(meta, 5);
+						parts.push(ext);
+					} else if (needsLogin) {
+						this.on.log('err', 'the server wants a login: fill in the user name and password');
+					}
+					const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+					let off = 0;
+					for (const p of parts) {
+						out.set(p, off);
+						off += p.length;
+					}
+					this.on.state('handshaking');
+					this.send(PKT.INFO, 0, out);
+				}
+
+				openTcp(host, port) {
+					const id = this.nextId++;
+					const h = enc.encode(host);
+					const payload = new Uint8Array(3 + h.length);
+					payload[0] = 1;
+					new DataView(payload.buffer).setUint16(1, port, true);
+					payload.set(h, 3);
+					this.send(PKT.CONNECT, id, payload);
+					return id;
+				}
+			}
+
+			const $ = (id) => document.getElementById(id);
+			let client = null;
+			let totalIn = 0;
+			let totalOut = 0;
+			let respBytes = 0;
+			let streamId = null;
+
+			const store = {
+				get(k) {
+					try {
+						return localStorage.getItem('holywisp.' + k);
+					} catch {
+						return null;
+					}
+				},
+				set(k, v) {
+					try {
+						localStorage.setItem('holywisp.' + k, v);
+					} catch {
+						/* private window: fine */
+					}
+				},
+			};
+
+			function stamp() {
+				const d = new Date();
+				return d.toLocaleTimeString('en-GB', { hour12: false }) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+			}
+
+			function log(kind, msg) {
+				const mark = { tx: '>', rx: '<', info: '·', err: '!' }[kind] || ' ';
+				const box = $('log');
+				box.value += `${stamp()}  ${mark} ${msg}\n`;
+				box.scrollTop = box.scrollHeight;
+			}
+
+			function setState(state, extra = {}) {
+				const cls = state === 'ready' || state === 'done' ? 'on' : state === 'error' ? 'bad' : state === 'closed' || state === 'idle' ? '' : 'busy';
+				$('dot').className = 'dot ' + cls;
+				$('state').textContent = state;
+				if (extra.ver) $('ver').textContent = extra.ver;
+				if (extra.win !== undefined) $('win').textContent = extra.win;
+				const live = state !== 'closed' && state !== 'error' && state !== 'done' && state !== 'idle';
+				$('go').disabled = live;
+				$('stop').disabled = !live;
+			}
+
+			function bytes(inc, out) {
+				totalIn += inc;
+				totalOut += out;
+				$('bytes').textContent = `${totalIn} / ${totalOut}`;
+			}
+
+			function target() {
+				if ($('mode').value === 'raw') {
+					const port = Number($('rawport').value);
+					if (!$('rawhost').value.trim() || !Number.isInteger(port) || port < 1 || port > 65535) {
+						throw new Error('enter a host and a port between 1 and 65535');
+					}
+					const text = $('rawtext').value.replace(/\r?\n/g, '\r\n');
+					return { host: $('rawhost').value.trim(), port, request: enc.encode(text) };
+				}
+				let u;
+				try {
+					u = new URL($('target').value.trim());
+				} catch {
+					throw new Error('the page to fetch is not a valid address');
+				}
+				if (u.protocol !== 'http:') throw new Error('only http:// pages can be fetched (this page cannot do TLS)');
+				const port = u.port ? Number(u.port) : 80;
+				const hostHeader = port === 80 ? u.hostname : `${u.hostname}:${port}`;
+				const req = `GET ${u.pathname || '/'}${u.search} HTTP/1.1\r\nHost: ${hostHeader}\r\nUser-Agent: holywisp-web\r\nAccept: */*\r\nConnection: close\r\n\r\n`;
+				return { host: u.hostname.replace(/^\[|\]$/g, ''), port, request: enc.encode(req) };
+			}
+
+			function start(ev) {
+				ev.preventDefault();
+				stop();
+				$('resp').value = '';
+				$('respcount').textContent = '';
+				$('motd').textContent = '';
+				totalIn = totalOut = respBytes = 0;
+				bytes(0, 0);
+				let dest;
+				try {
+					dest = target();
+				} catch (e) {
+					log('err', e.message);
+					setState('error');
+					return;
+				}
+				const url = $('wisp').value.trim();
+				if (!/^wss?:\/\//.test(url)) {
+					log('err', 'the Wisp server address must start with ws:// or wss://');
+					setState('error');
+					return;
+				}
+				persist();
+				streamId = null;
+				setState('connecting', { ver: '-', win: '-' });
+				client = new WispClient(url, {
+					v2: $('version').value === '2',
+					creds: { user: $('user').value, pass: $('pass').value },
+					log,
+					motd: (m) => {
+						$('motd').textContent = 'Message from the server: ' + m;
+					},
+					state: (s, extra) => {
+						setState(s, extra);
+						if (s === 'ready' && streamId === null) {
+							streamId = client.openTcp(dest.host, dest.port);
+							if (dest.request.length) {
+								client.send(PKT.DATA, streamId, dest.request);
+								bytes(0, dest.request.length);
+							}
+							log('info', `asked the server to reach ${dest.host}:${dest.port} on stream ${streamId}`);
+						}
+					},
+					data: (id, body) => {
+						if (id !== streamId) return;
+						bytes(body.length, 0);
+						respBytes += body.length;
+						const box = $('resp');
+						box.value += dec.decode(body, { stream: true });
+						box.scrollTop = box.scrollHeight;
+						$('respcount').textContent = `(${respBytes} bytes)`;
+					},
+					close: (id, reason) => {
+						if (id !== streamId) return;
+						log('info', `stream ${id} ended: ${REASONS[reason] || '0x' + (reason || 0).toString(16)}`);
+						setState(reason === 0x02 || reason === undefined ? 'done' : 'error');
+					},
+				});
+				client.connect();
+			}
+
+			function stop() {
+				if (client) {
+					client.close();
+					client = null;
+				}
+			}
+
+			function persist() {
+				for (const id of ['wisp', 'version', 'mode', 'user', 'target', 'rawhost', 'rawport']) store.set(id, $(id).value);
+			}
+
+			function shareLink() {
+				const p = new URLSearchParams({
+					wisp: $('wisp').value.trim(),
+					v: $('version').value,
+					mode: $('mode').value,
+				});
+				if ($('mode').value === 'http') p.set('target', $('target').value.trim());
+				else {
+					p.set('host', $('rawhost').value.trim());
+					p.set('port', $('rawport').value.trim());
+				}
+				const link = `${location.origin}${location.pathname}#${p}`;
+				const done = () => log('info', 'link copied (it holds the addresses, never the login)');
+				if (navigator.clipboard) navigator.clipboard.writeText(link).then(done, () => prompt('Copy this link', link));
+				else prompt('Copy this link', link);
+			}
+
+			function applyMode() {
+				const raw = $('mode').value === 'raw';
+				$('httpbox').classList.toggle('hidden', raw);
+				$('rawbox').classList.toggle('hidden', !raw);
+			}
+
+			function applyVersion() {
+				const v2 = $('version').value === '2';
+				$('creds').classList.toggle('hidden', !v2);
+				$('credsnote').classList.toggle('hidden', !v2);
+			}
+
+			function checkMixed() {
+				const url = $('wisp').value.trim();
+				const insecure = location.protocol === 'https:' && /^ws:\/\//.test(url) && !/^ws:\/\/(localhost|127\.0\.0\.1|\[::1\])([:/]|$)/.test(url);
+				$('mixed').classList.toggle('hidden', !insecure);
+			}
+
+			function init() {
+				for (const id of ['wisp', 'version', 'mode', 'user', 'target', 'rawhost', 'rawport']) {
+					const v = store.get(id);
+					if (v !== null) $(id).value = v;
+				}
+				// A page served by the Wisp server itself defaults to that server.
+				const cfg = window.HOLYWISP_CONFIG || {};
+				if (cfg.wisp) $('wisp').value = cfg.wisp;
+				else if (cfg.self && /^https?:$/.test(location.protocol) && !store.get('wisp')) {
+					$('wisp').value = `${location.origin.replace(/^http/, 'ws')}/`;
+				}
+				// A shared link wins over saved values.
+				const h = new URLSearchParams(location.hash.slice(1));
+				const map = { wisp: 'wisp', v: 'version', mode: 'mode', target: 'target', host: 'rawhost', port: 'rawport' };
+				for (const [k, id] of Object.entries(map)) if (h.has(k)) $(id).value = h.get(k);
+				if (!['1', '2'].includes($('version').value)) $('version').value = '2';
+				if (!['http', 'raw'].includes($('mode').value)) $('mode').value = 'http';
+				applyMode();
+				applyVersion();
+				checkMixed();
+				setState('idle');
+				$('form').addEventListener('submit', start);
+				$('stop').onclick = () => {
+					stop();
+					setState('closed');
+				};
+				$('clear').onclick = () => {
+					$('resp').value = '';
+					$('log').value = '';
+					$('respcount').textContent = '';
+				};
+				$('share').onclick = shareLink;
+				$('mode').onchange = applyMode;
+				$('version').onchange = applyVersion;
+				$('wisp').oninput = checkMixed;
+				$('showlog').onchange = (e) => $('log').classList.toggle('hidden', !e.target.checked);
+			}
+
+			init();
+		</script>
+	</body>
+</html>

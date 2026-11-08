@@ -1,19 +1,21 @@
 //! The built-in web client and the other canned HTTP bodies.
 
-pub const WEBCLIENT_HTML: &str = include_str!("../../../examples/wisp-webclient.html");
+pub const WEBCLIENT_HTML: &str = include_str!("../../../web/index.html");
 
-/// The web client with `webclient-wisp-url` spliced into it (before `</head>`), or the page as
-/// built when the URL is empty. The URL must already have passed [`check_wisp_url`].
+/// The web client as the server hands it out. The page learns it is being served by a Wisp server
+/// (`self`), so it defaults to this origin, and `webclient-wisp-url`, when set, replaces that
+/// default. The URL must already have passed [`check_wisp_url`].
 pub fn webclient_page(url: &str) -> Result<Vec<u8>, String> {
-    if url.is_empty() {
-        return Ok(WEBCLIENT_HTML.as_bytes().to_vec());
-    }
     let at = WEBCLIENT_HTML
         .find("</head>")
         .ok_or("web client has no </head> to inject into")?;
-    let script = format!(
-        "\t\t<script>\n\t\t\twindow.HOLYWISP_CONFIG = {{ wisp: \"{url}\" }};\n\t\t</script>\n\t"
-    );
+    let config = if url.is_empty() {
+        "{ self: true }".to_string()
+    } else {
+        format!("{{ self: true, wisp: \"{url}\" }}")
+    };
+    let script =
+        format!("\t\t<script>\n\t\t\twindow.HOLYWISP_CONFIG = {config};\n\t\t</script>\n\t");
     let mut page = String::with_capacity(WEBCLIENT_HTML.len() + script.len());
     page.push_str(&WEBCLIENT_HTML[..at]);
     page.push_str(&script);
@@ -52,8 +54,17 @@ mod tests {
     }
 
     #[test]
-    fn empty_url_serves_the_page_as_built() {
-        assert_eq!(webclient_page("").unwrap(), WEBCLIENT_HTML.as_bytes());
+    fn without_a_url_the_page_only_learns_it_is_served_by_the_server() {
+        let page = String::from_utf8(webclient_page("").unwrap()).unwrap();
+        assert!(page.contains("HOLYWISP_CONFIG = { self: true };"));
+        assert!(!page.contains("wisp: \""));
+    }
+
+    #[test]
+    fn the_page_needs_nothing_from_other_sites() {
+        for needle in ["src=\"http", "href=\"http://", "@import", "cdn."] {
+            assert!(!WEBCLIENT_HTML.contains(needle), "{needle}");
+        }
     }
 
     #[test]
