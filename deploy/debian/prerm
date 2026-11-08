@@ -1,9 +1,0 @@
-#!/bin/sh
-# Stop the service before the files go away.
-set -e
-if [ "$1" = remove ] || [ "$1" = deconfigure ]; then
-	if [ -d /run/systemd/system ]; then
-		systemctl stop holywisp.service >/dev/null 2>&1 || true
-	fi
-fi
-exit 0

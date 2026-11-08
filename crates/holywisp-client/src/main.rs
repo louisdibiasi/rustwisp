@@ -87,6 +87,16 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
     }))
 }
 
+/// Text from the server, made safe to show in a terminal: control characters (escape sequences
+/// included) become '?' and the length is capped.
+fn printable(text: &str) -> String {
+    const MAX_CHARS: usize = 500;
+    text.chars()
+        .take(MAX_CHARS)
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
+}
+
 /// Copy standard input to the stream until it ends or the stream goes away.
 fn pump_stdin(handle: Handle, stream: u32, stdin_done: Arc<AtomicBool>) {
     let mut stdin = io::stdin().lock();
@@ -108,7 +118,7 @@ fn run(args: Args) -> Result<(), String> {
     let (handle, mut reader) =
         connect(&args.url, &args.options).map_err(|e| format!("connect: {e}"))?;
     if let Some(motd) = handle.motd() {
-        eprintln!("motd: {motd}");
+        eprintln!("motd: {}", printable(&motd));
     }
     let kind = if args.udp {
         stream_type::UDP
@@ -189,5 +199,16 @@ fn main() -> ExitCode {
             eprintln!("holywisp-cli: {m}");
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::printable;
+
+    #[test]
+    fn terminal_escapes_in_server_text_are_defanged() {
+        assert_eq!(printable("hi\u{1b}[2Jthere\r\n"), "hi?[2Jthere??");
+        assert_eq!(printable(&"x".repeat(900)).len(), 500);
     }
 }
