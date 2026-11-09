@@ -52,6 +52,8 @@ pub(crate) struct ProxyHs {
 pub(crate) struct Stream {
     pub id: u32,
     pub udp: bool,
+    #[cfg(feature = "twisp")]
+    pub terminal: Option<crate::twisp::Handle>,
     pub state: SState,
     pub fd: Option<OwnedFd>,
     pub reg: Reg,
@@ -128,6 +130,8 @@ fn new_stream(cx: &mut Ctx, conn_tok: u64, id: u32, udp: bool, host: &str, port:
     Stream {
         id,
         udp,
+        #[cfg(feature = "twisp")]
+        terminal: None,
         state: SState::Resolving,
         fd: None,
         reg: Reg::new(token),
@@ -156,6 +160,8 @@ pub(crate) fn close_stream(link: &mut Link, cx: &mut Ctx, s: &mut Stream, reason
         "stream",
         format_args!("{}: stream {} closed: {reason:#x}", link.ip, s.id),
     );
+    #[cfg(feature = "twisp")]
+    drop(s.terminal.take());
     s.state = SState::Closed;
     release_syn(cx, s);
     s.fd = None; // closing the descriptor removes it from epoll
@@ -331,6 +337,24 @@ pub(crate) fn open(conn: &mut Conn, cx: &mut Ctx, id: u32, kind: u8, host: &str,
     }
 }
 
+#[cfg(feature = "twisp")]
+pub(crate) fn open_terminal(conn: &mut Conn, cx: &mut Ctx, id: u32, command: &str) {
+    let (master, terminal) = match cx.sh.terminals.spawn(command) {
+        Ok(pair) => pair,
+        Err(reason) => {
+            conn.link.send_close(cx, id, reason);
+            return;
+        }
+    };
+    let mut s = new_stream(cx, conn.link.reg.token, id, false, "", 0);
+    s.terminal = Some(terminal);
+    s.fd = Some(master);
+    connected(&mut conn.link, cx, &mut s);
+    if s.state != SState::Closed {
+        conn.streams.insert(id, s);
+    }
+}
+
 fn open_literal(link: &mut Link, cx: &mut Ctx, s: &mut Stream, ip: IpAddr) {
     if !cx.cfg().allow_direct_ip {
         crate::log::info(
@@ -486,6 +510,7 @@ fn connected(link: &mut Link, cx: &mut Ctx, s: &mut Stream) {
     s.state = SState::Open;
     s.serial = s.serial.wrapping_add(1);
     if !s.udp
+        && !is_terminal(s)
         && let Some(fd) = s.fd.as_ref()
     {
         let c = cx.cfg();
@@ -708,8 +733,21 @@ pub(crate) fn on_event(link: &mut Link, cx: &mut Ctx, s: &mut Stream, flags: Eve
 
 // ------------------------------------------------------------------------------------- client -> remote
 
+fn is_terminal(s: &Stream) -> bool {
+    #[cfg(feature = "twisp")]
+    {
+        s.terminal.is_some()
+    }
+    #[cfg(not(feature = "twisp"))]
+    {
+        let _ = s;
+        false
+    }
+}
+
 fn send_remote(s: &Stream, buf: &[u8]) -> Result<usize, Errno> {
     match s.fd.as_ref() {
+        Some(fd) if is_terminal(s) => rustix::io::write(fd, buf),
         Some(fd) => sys::send(fd, buf),
         None => Err(Errno::BADF),
     }
@@ -814,7 +852,7 @@ pub(crate) fn on_data(link: &mut Link, cx: &mut Ctx, s: &mut Stream, data: &[u8]
 // ------------------------------------------------------------------------------------- remote -> client
 
 fn use_splice(link: &Link, cx: &Ctx, s: &Stream) -> bool {
-    if s.udp || cx.pipe.is_none() || !link.wbuf.is_empty() {
+    if is_terminal(s) || s.udp || cx.pipe.is_none() || !link.wbuf.is_empty() {
         return false;
     }
     match cx.sh.splice {
@@ -845,7 +883,12 @@ fn read_copy(link: &mut Link, cx: &mut Ctx, s: &mut Stream) {
             break;
         }
         let Some(fd) = s.fd.as_ref() else { break };
-        match sys::recv(fd, &mut rd[..REMOTE_CHUNK]) {
+        let result = if is_terminal(s) {
+            sys::read_fd(fd, &mut rd[..REMOTE_CHUNK])
+        } else {
+            sys::recv(fd, &mut rd[..REMOTE_CHUNK])
+        };
+        match result {
             Ok(0) => {
                 close_stream(link, cx, s, close::VOLUNTARY, true);
                 break;
@@ -860,7 +903,12 @@ fn read_copy(link: &mut Link, cx: &mut Ctx, s: &mut Stream) {
             Err(Errno::INTR) => {}
             Err(e) if sys::is_would_block(e) => break,
             Err(e) => {
-                close_stream(link, cx, s, map_errno(e), true);
+                let reason = if is_terminal(s) && e == Errno::IO {
+                    close::VOLUNTARY
+                } else {
+                    map_errno(e)
+                };
+                close_stream(link, cx, s, reason, true);
                 break;
             }
         }

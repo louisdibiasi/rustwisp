@@ -49,6 +49,8 @@ pub(crate) struct Shared {
     pub webclient: Vec<u8>,
     pub splice: SpliceMode,
     pub resolver: Resolver,
+    #[cfg(feature = "twisp")]
+    pub terminals: Arc<crate::twisp::Terminals>,
     pub auth: AuthPool,
     /// The upstream proxy for outbound TCP, when one is configured.
     pub upstream: Option<Upstream>,

@@ -1,6 +1,6 @@
 //! Thin, non-blocking wrappers over the Linux calls the server uses: epoll, accept4, listeners with
-//! SO_REUSEPORT, splice and pipes, `send` with `MSG_MORE`. Built on `rustix`, so the only `unsafe`
-//! in this file is the signal handler.
+//! SO_REUSEPORT, splice and pipes, `send` with `MSG_MORE`. Built on `rustix`; unsafe code is confined to
+//! signal handling and terminal child setup.
 
 #![allow(unsafe_code)]
 
@@ -302,6 +302,72 @@ pub(crate) fn dns_id() -> io::Result<u16> {
     let mut bytes = [0; 2];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     Ok(u16::from_ne_bytes(bytes))
+}
+
+#[cfg(feature = "twisp")]
+pub(crate) fn spawn_terminal(args: &[String]) -> io::Result<(OwnedFd, std::process::Child)> {
+    use rustix::pty::{self, OpenptFlags};
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let master = pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC)?;
+    pty::grantpt(&master)?;
+    pty::unlockpt(&master)?;
+    let slave = pty::ioctl_tiocgptpeer(
+        &master,
+        OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC,
+    )?;
+    rustix::fs::fcntl_setfl(
+        &master,
+        rustix::fs::fcntl_getfl(&master)? | rustix::fs::OFlags::NONBLOCK,
+    )?;
+    let mut command = Command::new(&args[0]);
+    command
+        .args(&args[1..])
+        .env("TERM", "xterm-256color")
+        .stdin(Stdio::from(slave.try_clone()?))
+        .stdout(Stdio::from(slave.try_clone()?))
+        .stderr(Stdio::from(slave));
+    // SAFETY: the child hook only makes async-signal-safe calls, with no allocation or locks.
+    // CLOEXEC preserves Command's error pipe until exec; no descriptor above 2 survives exec.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::syscall(
+                libc::SYS_close_range,
+                3u32,
+                u32::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            ) < 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok((master, command.spawn()?))
+}
+
+#[cfg(feature = "twisp")]
+pub(crate) fn terminal_signal(pid: u32, kill: bool) {
+    use rustix::process::{Pid, Signal, kill_process_group};
+    if let Some(pid) = Pid::from_raw(pid as i32) {
+        let _ = kill_process_group(pid, if kill { Signal::KILL } else { Signal::HUP });
+    }
+}
+
+#[cfg(feature = "twisp")]
+pub(crate) fn terminal_resize(fd: &OwnedFd, rows: u16, cols: u16) {
+    let _ = rustix::termios::tcsetwinsize(
+        fd,
+        rustix::termios::Winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        },
+    );
 }
 
 #[cfg(test)]

@@ -83,6 +83,8 @@ fn maintenance(sh: &Shared) {
     loop {
         std::thread::park_timeout(Duration::from_secs(1));
         let stopping = sh.stop.load(Ordering::Acquire);
+        #[cfg(feature = "twisp")]
+        let terminals_done = sh.terminals.maintain(stopping);
         let now = sh.now_ms();
         if now.saturating_sub(last_slow) >= 60_000 || stopping {
             last_slow = now;
@@ -131,6 +133,10 @@ fn maintenance(sh: &Shared) {
             }
         }
         if stopping {
+            #[cfg(feature = "twisp")]
+            if !terminals_done {
+                continue;
+            }
             return;
         }
     }
@@ -200,6 +206,8 @@ impl Server {
             webclient,
             splice,
             resolver,
+            #[cfg(feature = "twisp")]
+            terminals: Arc::new(crate::twisp::Terminals::default()),
             auth: AuthPool::new(if hashed { 2 } else { 0 }),
             upstream,
             started: std::time::Instant::now(),

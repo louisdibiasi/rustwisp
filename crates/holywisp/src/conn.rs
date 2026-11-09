@@ -619,7 +619,18 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
         }
         let sid = p.stream_id;
         let req = match wisp::parse_connect(p) {
-            Ok(r) if !r.host.is_empty() && r.host.len() <= 255 && !r.host.contains(&0) => r,
+            Ok(r)
+                if !r.host.is_empty()
+                    && r.host.len()
+                        <= if cfg!(feature = "twisp") && r.stream_type == stream_type::TERM {
+                            4096
+                        } else {
+                            255
+                        }
+                    && !r.host.contains(&0) =>
+            {
+                r
+            }
             _ => {
                 self.link.send_close(cx, sid, close::INVALID_INFO);
                 return;
@@ -640,7 +651,16 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
         }
         let c = cx.cfg();
         if req.stream_type == stream_type::TERM {
-            // Terminal streams are not built into this server yet.
+            #[cfg(feature = "twisp")]
+            if c.enable_twisp && self.link.is_v2 && self.link.authenticated {
+                stream::open_terminal(self, cx, sid, host);
+                return;
+            }
+            self.link.rep_source(cx, Event::TwispNoAuth);
+            crate::log::warn(
+                "twisp",
+                format_args!("{}: terminal stream refused", self.link.ip),
+            );
             self.link.send_close(cx, sid, close::BLOCKED);
             return;
         }
@@ -696,6 +716,19 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
                 }
             }
             ptype::CONNECT => self.handle_connect(cx, &p),
+            #[cfg(feature = "twisp")]
+            wisp::TWISP_RESIZE if p.payload.len() >= 4 => {
+                if let Some(s) = self.streams.get(&p.stream_id)
+                    && s.terminal.is_some()
+                    && let Some(fd) = s.fd.as_ref()
+                {
+                    sys::terminal_resize(
+                        fd,
+                        u16::from_le_bytes([p.payload[0], p.payload[1]]),
+                        u16::from_le_bytes([p.payload[2], p.payload[3]]),
+                    );
+                }
+            }
             ptype::CLOSE => {
                 if p.stream_id == 0 {
                     self.link.close();

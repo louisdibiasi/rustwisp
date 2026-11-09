@@ -31,6 +31,8 @@ mod server;
 mod stream;
 #[cfg(target_os = "linux")]
 pub mod sys;
+#[cfg(all(target_os = "linux", feature = "twisp"))]
+mod twisp;
 #[cfg(target_os = "linux")]
 mod worker;
 

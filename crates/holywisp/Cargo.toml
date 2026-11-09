@@ -11,6 +11,10 @@ repository.workspace = true
 name = "holywisp"
 path = "src/main.rs"
 
+[features]
+default = []
+twisp = ["rustix/pty", "rustix/process", "rustix/termios"]
+
 [dependencies]
 holywisp-proto = { path = "../holywisp-proto" }
 holywisp-config = { path = "../holywisp-config" }
