@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -100,7 +100,7 @@ struct Cache {
 
 #[derive(Debug)]
 pub(crate) struct Resolver {
-    tx: Mutex<Sender<Job>>,
+    tx: Mutex<SyncSender<Job>>,
     cache: Arc<Cache>,
 }
 
@@ -167,7 +167,9 @@ fn worker_loop(
         if !ttl.is_zero()
             && let Ok(mut map) = cache.map.lock()
         {
-            map.insert(job.host.clone(), (Instant::now() + ttl, answer.clone()));
+            if map.len() < 4096 || map.contains_key(&job.host) {
+                map.insert(job.host.clone(), (Instant::now() + ttl, answer.clone()));
+            }
             cache.entries.store(map.len() as u64, Ordering::Relaxed);
         }
         job.mailbox.post(DnsDone {
@@ -189,7 +191,7 @@ impl Resolver {
         timeout: Duration,
     ) -> Resolver {
         let servers = Arc::new(servers);
-        let (tx, rx) = channel::<Job>();
+        let (tx, rx) = sync_channel::<Job>(256);
         let rx = Arc::new(Mutex::new(rx));
         let cache = Arc::new(Cache {
             map: Mutex::new(HashMap::new()),
@@ -260,7 +262,7 @@ impl Resolver {
         let sent = self
             .tx
             .lock()
-            .map(|tx| tx.send(job).is_ok())
+            .map(|tx| tx.try_send(job).is_ok())
             .unwrap_or(false);
         if !sent {
             mailbox.post(DnsDone {
@@ -276,6 +278,64 @@ impl Resolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn busy_resolver_refuses_excess_waiting_jobs() {
+        let dns = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        dns.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mb = Mailbox::new().unwrap();
+        let resolver = Resolver::new(
+            1,
+            60,
+            60,
+            DnsOrder::Ipv4First,
+            vec![dns.local_addr().unwrap()],
+            Duration::from_secs(1),
+        );
+        resolver.submit("held.test", &mb, 1, 1, 1);
+        dns.recv_from(&mut [0; 512]).unwrap();
+        for i in 0..512 {
+            resolver.submit(&format!("queued{i}.test"), &mb, 1, i, 1);
+        }
+        let refused = mb.take();
+        assert!(!refused.is_empty(), "all jobs entered an unbounded queue");
+        assert!(refused.iter().all(|done| done.addrs.is_err()));
+    }
+
+    #[test]
+    fn distinct_names_cannot_grow_the_cache_without_bound() {
+        let dns = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        dns.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let endpoint = dns.local_addr().unwrap();
+        let responder = std::thread::spawn(move || {
+            for _ in 0..4097 * 2 {
+                let mut buf = [0; 512];
+                let (n, peer) = dns.recv_from(&mut buf).unwrap();
+                buf[2] = 0x81;
+                buf[3] = 0x83;
+                dns.send_to(&buf[..n], peer).unwrap();
+            }
+        });
+        let mb = Mailbox::new().unwrap();
+        let resolver = Resolver::new(
+            1,
+            60,
+            60,
+            DnsOrder::Ipv4First,
+            vec![endpoint],
+            Duration::from_secs(1),
+        );
+        let deadline = Instant::now() + Duration::from_secs(20);
+        for i in 0..4097 {
+            resolver.submit(&format!("unique{i}.test"), &mb, 1, i, 1);
+            while mb.take().is_empty() {
+                assert!(Instant::now() < deadline);
+                std::thread::yield_now();
+            }
+        }
+        responder.join().unwrap();
+        assert!(resolver.cache_entries() <= 4096, "cache has no entry cap");
+    }
 
     #[test]
     fn ordering_puts_the_preferred_family_first() {
