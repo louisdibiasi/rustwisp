@@ -3,6 +3,34 @@
 
 mod common;
 
+#[test]
+fn stale_proxy_timer_cannot_close_a_reused_stream_id() {
+    use std::time::Duration;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut cfg = via(&format!(
+        "http://127.0.0.1:{}",
+        listener.local_addr().unwrap().port()
+    ));
+    cfg.connect_timeout_ms = 300;
+    let h = common::start(cfg);
+    let mut c = common::Client::v1(h.port());
+    c.tcp(1, 12345);
+    let (mut old, _) = listener.accept().unwrap();
+    old.set_read_timeout(Some(common::TIMEOUT)).unwrap();
+    let mut head = [0; 1024];
+    assert!(std::io::Read::read(&mut old, &mut head).unwrap() > 0);
+    std::thread::sleep(Duration::from_millis(180));
+    c.send_packet(rustwisp_proto::wisp::ptype::CLOSE, 1, &[0]);
+    c.tcp(1, 12345);
+    let (mut new, _) = listener.accept().unwrap();
+    new.set_read_timeout(Some(common::TIMEOUT)).unwrap();
+    assert!(std::io::Read::read(&mut new, &mut head).unwrap() > 0);
+    std::thread::sleep(Duration::from_millis(180));
+    std::io::Write::write_all(&mut new, b"HTTP/1.1 200 OK\r\n\r\nfresh").unwrap();
+    assert_eq!(c.read_data(1, 5), b"fresh");
+    h.stop_and_join();
+}
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};

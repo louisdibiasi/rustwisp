@@ -67,7 +67,7 @@ pub(crate) struct Stream {
     pub addrs: Vec<SocketAddr>,
     pub addr_idx: usize,
     /// Bumped on every resolve or connect attempt so a late timer or answer can be recognised.
-    pub serial: u32,
+    pub serial: u64,
     /// The last remote read filled a whole chunk, so more is probably waiting.
     pub bulk: bool,
     /// Holds one of the in-flight SYN slots.
@@ -143,7 +143,7 @@ fn new_stream(cx: &mut Ctx, conn_tok: u64, id: u32, udp: bool, host: &str, port:
         port,
         addrs: Vec::new(),
         addr_idx: 0,
-        serial: 0,
+        serial: cx.next_serial(),
         bulk: false,
         syn_held: false,
         dest: String::new(),
@@ -315,7 +315,7 @@ pub(crate) fn open(conn: &mut Conn, cx: &mut Ctx, id: u32, kind: u8, host: &str,
         Err(()) => close_stream(link, cx, &mut s, close::INVALID_INFO, true),
         Ok(Some(ip)) => open_literal(link, cx, &mut s, ip),
         Ok(None) => {
-            s.serial = s.serial.wrapping_add(1);
+            s.serial = cx.next_serial();
             let servers = cx
                 .cfg()
                 .dns_servers
@@ -423,7 +423,7 @@ pub(crate) fn on_resolved(
         close_stream(link, cx, s, reason, true);
         return;
     }
-    s.serial = s.serial.wrapping_add(1);
+    s.serial = cx.next_serial();
     if dest_policy(link, cx, s) {
         begin_connect(link, cx, s);
     }
@@ -443,7 +443,7 @@ fn begin_connect(link: &mut Link, cx: &mut Ctx, s: &mut Stream) {
 
 /// Try the next resolved address.
 fn connect_next(link: &mut Link, cx: &mut Ctx, s: &mut Stream, mut last: Errno) {
-    s.serial = s.serial.wrapping_add(1);
+    s.serial = cx.next_serial();
     while s.addr_idx < s.addrs.len() {
         let addr = s.addrs[s.addr_idx];
         s.addr_idx += 1;
@@ -508,7 +508,7 @@ fn connected(link: &mut Link, cx: &mut Ctx, s: &mut Stream) {
     release_syn(cx, s);
     link.rep_source(cx, Event::SuccessfulStream);
     s.state = SState::Open;
-    s.serial = s.serial.wrapping_add(1);
+    s.serial = cx.next_serial();
     if !s.udp
         && !is_terminal(s)
         && let Some(fd) = s.fd.as_ref()
@@ -531,7 +531,7 @@ fn connected(link: &mut Link, cx: &mut Ctx, s: &mut Stream) {
 }
 
 /// A connect or resolve timer fired.
-pub(crate) fn on_connect_timer(link: &mut Link, cx: &mut Ctx, s: &mut Stream, serial: u32) {
+pub(crate) fn on_connect_timer(link: &mut Link, cx: &mut Ctx, s: &mut Stream, serial: u64) {
     if s.serial != serial {
         return;
     }
@@ -590,7 +590,7 @@ fn start_proxy(link: &mut Link, cx: &mut Ctx, s: &mut Stream) {
         sent: 0,
     }));
     s.state = SState::ProxyHandshake;
-    s.serial = s.serial.wrapping_add(1);
+    s.serial = cx.next_serial();
     let t = Duration::from_millis(u64::from(cx.cfg().connect_timeout_ms.max(1)));
     cx.add_timer(t, link.reg.token, s.id, s.serial, TimerKind::Connect);
     proxy_write(link, cx, s);

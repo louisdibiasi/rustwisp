@@ -205,7 +205,7 @@ impl Conn {
         }
     }
 
-    pub(crate) fn on_timer(&mut self, cx: &mut Ctx, kind: TimerKind, sid: u32, serial: u32) {
+    pub(crate) fn on_timer(&mut self, cx: &mut Ctx, kind: TimerKind, sid: u32, serial: u64) {
         match kind {
             TimerKind::Handshake => {
                 if !self.link.handshake_done {

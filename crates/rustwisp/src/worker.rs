@@ -97,7 +97,7 @@ pub(crate) struct Timer {
     pub at: Instant,
     pub conn: u64,
     pub sid: u32,
-    pub serial: u32,
+    pub serial: u64,
     pub kind: u8,
 }
 
@@ -131,11 +131,17 @@ pub(crate) struct Ctx {
     pub rd: Vec<u8>,
     pub pipe: Option<(OwnedFd, OwnedFd)>,
     pub timers: BinaryHeap<Reverse<Timer>>,
+    next_serial: u64,
     pub mailbox: Arc<Mailbox>,
     pub index: usize,
 }
 
 impl Ctx {
+    pub(crate) fn next_serial(&mut self) -> u64 {
+        self.next_serial = self.next_serial.wrapping_add(1);
+        self.next_serial
+    }
+
     pub(crate) fn cfg(&self) -> &Config {
         &self.sh.cfg
     }
@@ -145,7 +151,7 @@ impl Ctx {
         after: Duration,
         conn: u64,
         sid: u32,
-        serial: u32,
+        serial: u64,
         kind: TimerKind,
     ) {
         self.timers.push(Reverse(Timer {
@@ -194,6 +200,7 @@ impl Worker {
             rd: vec![0u8; 65_536],
             pipe,
             timers: BinaryHeap::new(),
+            next_serial: 0,
             mailbox,
             index,
         };

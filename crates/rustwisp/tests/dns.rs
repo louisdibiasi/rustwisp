@@ -5,6 +5,56 @@ use rustwisp_proto::wisp::ptype;
 use std::net::UdpSocket;
 
 #[test]
+fn stale_dns_reply_cannot_connect_a_reused_stream_id() {
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+    let dns = UdpSocket::bind("127.0.0.1:0").unwrap();
+    dns.set_read_timeout(Some(TIMEOUT)).unwrap();
+    let mut cfg = test_config();
+    cfg.resolver_threads = 2;
+    cfg.dns_servers = vec![dns.local_addr().unwrap().to_string()];
+    let echo = TcpListener::bind("127.0.0.1:0").unwrap();
+    echo.set_nonblocking(true).unwrap();
+    let h = start(cfg);
+    let mut c = Client::v1(h.port());
+    let receive = || {
+        let mut buf = [0; 512];
+        let (n, peer) = dns.recv_from(&mut buf).unwrap();
+        (buf[..n].to_vec(), peer)
+    };
+    let reply = |mut query: Vec<u8>, peer, address: bool| {
+        query[2] = 0x81;
+        query[3] = if address { 0x80 } else { 0x83 };
+        if address {
+            query[7] = 1;
+            query.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 127, 0, 0, 1]);
+        }
+        dns.send_to(&query, peer).unwrap();
+    };
+    c.connect_stream(1, 1, "old.test", echo.local_addr().unwrap().port());
+    let old = receive();
+    c.send_packet(ptype::CLOSE, 1, &[0]);
+    c.connect_stream(1, 1, "new.test", echo.local_addr().unwrap().port());
+    let new = receive();
+    reply(old.0, old.1, true);
+    let old_v6 = receive();
+    reply(old_v6.0, old_v6.1, false);
+    let deadline = Instant::now() + Duration::from_millis(400);
+    while Instant::now() < deadline {
+        assert!(
+            echo.accept().is_err(),
+            "stale reply connected the replacement stream"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    reply(new.0, new.1, false);
+    let new_v6 = receive();
+    reply(new_v6.0, new_v6.1, false);
+    c.expect_close(1, rustwisp_proto::wisp::close::UNREACHABLE);
+    h.stop_and_join();
+}
+
+#[test]
 fn custom_resolver_reaches_local_echo() {
     for (ttl, allow) in [(0, true), (60, true), (120, true), (60, false)] {
         let dns = UdpSocket::bind("127.0.0.1:0").unwrap();

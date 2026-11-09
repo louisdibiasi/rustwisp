@@ -20,7 +20,7 @@ use crate::sys;
 pub(crate) struct DnsDone {
     pub conn: u64,
     pub sid: u32,
-    pub serial: u32,
+    pub serial: u64,
     /// `Err(())` is "does not resolve".
     pub addrs: Result<Vec<IpAddr>, ()>,
 }
@@ -85,7 +85,7 @@ struct Job {
     mailbox: Arc<Mailbox>,
     conn: u64,
     sid: u32,
-    serial: u32,
+    serial: u64,
 }
 
 type CacheMap = HashMap<String, (Instant, Result<Vec<IpAddr>, ()>)>;
@@ -233,7 +233,7 @@ impl Resolver {
         mailbox: &Arc<Mailbox>,
         conn: u64,
         sid: u32,
-        serial: u32,
+        serial: u64,
     ) {
         let key = rustwisp_config::normalize_hostname(host);
         let hit = self.cache.map.lock().ok().and_then(|m| {
