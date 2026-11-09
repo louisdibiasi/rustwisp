@@ -823,7 +823,7 @@ pub(crate) fn on_data(link: &mut Link, cx: &mut Ctx, s: &mut Stream, data: &[u8]
         }
         queued = !data.is_empty();
     }
-    if queued && !data.is_empty() {
+    if queued && (s.udp || !data.is_empty()) {
         if s.out.len() + data.len() + 4 > cx.cfg().stream_queue_max as usize {
             crate::log::debug(
                 "stream",
