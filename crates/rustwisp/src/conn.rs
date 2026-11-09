@@ -820,7 +820,14 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
                     return self.ws_fail(cx, 1002);
                 }
                 let code = if payload.len() >= 2 {
-                    u16::from_be_bytes([payload[0], payload[1]])
+                    let code = u16::from_be_bytes([payload[0], payload[1]]);
+                    if !matches!(code, 1000..=1003 | 1007..=1014 | 3000..=4999) {
+                        return self.ws_fail(cx, 1002);
+                    }
+                    if std::str::from_utf8(&payload[2..]).is_err() {
+                        return self.ws_fail(cx, 1007);
+                    }
+                    code
                 } else {
                     1000
                 };

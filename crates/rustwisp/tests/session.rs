@@ -4,6 +4,46 @@
 mod common;
 
 #[test]
+fn websocket_close_payloads_are_validated() {
+    let h = common::start(common::test_config());
+    for code in [0u16, 999, 1004, 1005, 1006, 1015, 1016, 2999, 5000, 65535] {
+        let mut c = common::Client::v1(h.port());
+        c.send_frame(rustwisp_proto::ws::opcode::CLOSE, true, &code.to_be_bytes());
+        assert_eq!(
+            c.recv_frame(),
+            (
+                rustwisp_proto::ws::opcode::CLOSE,
+                1002u16.to_be_bytes().to_vec()
+            ),
+            "{code}"
+        );
+    }
+    let mut c = common::Client::v1(h.port());
+    c.send_frame(rustwisp_proto::ws::opcode::CLOSE, true, &[3, 232, 0xff]);
+    assert_eq!(
+        c.recv_frame(),
+        (
+            rustwisp_proto::ws::opcode::CLOSE,
+            1007u16.to_be_bytes().to_vec()
+        )
+    );
+    for code in [
+        1000u16, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 3000, 4999,
+    ] {
+        let mut c = common::Client::v1(h.port());
+        c.send_frame(rustwisp_proto::ws::opcode::CLOSE, true, &code.to_be_bytes());
+        assert_eq!(
+            c.recv_frame(),
+            (
+                rustwisp_proto::ws::opcode::CLOSE,
+                code.to_be_bytes().to_vec()
+            )
+        );
+    }
+    h.stop_and_join();
+}
+
+#[test]
 fn malformed_upgrade_is_rejected_before_switching_protocols() {
     let h = common::start(common::test_config());
     for extra in [
