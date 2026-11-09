@@ -450,7 +450,7 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
         let values: Vec<&str> = c
             .trusted_headers
             .iter()
-            .filter_map(|h| req.header(h))
+            .filter_map(|h| req.complete_header(h))
             .collect();
         let ip = filter::real_ip(self.link.peer.ip(), &c.trusted_proxies, &values);
         self.link.ip = ip.to_string();

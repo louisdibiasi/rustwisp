@@ -4,6 +4,31 @@
 mod common;
 
 #[test]
+fn duplicate_and_truncated_proxy_headers_cannot_rotate_the_limited_address() {
+    for truncated in [false, true] {
+        let cfg = rustwisp_config::Config {
+            connections_limit_per_ip: 1,
+            connection_window_s: 100,
+            trusted_proxies: vec!["127.0.0.1".parse().unwrap(), "10.0.0.0/8".parse().unwrap()],
+            ..common::test_config()
+        };
+        let h = common::start(cfg);
+        for (i, spoof) in ["198.51.100.1", "198.51.100.2"].into_iter().enumerate() {
+            let extra = if truncated {
+                format!(
+                    "X-Forwarded-For: {spoof}, {}203.0.113.9\r\n",
+                    "10.0.0.1, ".repeat(70)
+                )
+            } else {
+                format!("X-Forwarded-For: {spoof}\r\nX-Forwarded-For: 203.0.113.9\r\n")
+            };
+            assert!(upgrade_status(h.port(), &extra).contains(if i == 0 { "101" } else { "429" }));
+        }
+        h.stop_and_join();
+    }
+}
+
+#[test]
 fn idle_http_connections_count_toward_the_connection_cap() {
     let cfg = rustwisp_config::Config {
         flood: flood(|f| f.max_concurrent_connections = 2),

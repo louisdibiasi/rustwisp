@@ -21,15 +21,29 @@ pub struct Request {
     /// `Upgrade: websocket`, `Connection: upgrade`, version 13, a key, and method GET.
     pub is_websocket: bool,
     pub headers: Vec<(String, String)>,
+    pub truncated_headers: Vec<String>,
 }
 
 impl Request {
-    /// Case-insensitive lookup of the first header with this name.
+    /// Case-insensitive lookup of the combined values for this name.
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
             .find(|(n, _)| n.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.as_str())
+    }
+
+    /// Forwarded addresses must never be selected from a truncated list.
+    pub fn complete_header(&self, name: &str) -> Option<&str> {
+        if self
+            .truncated_headers
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(name))
+        {
+            None
+        } else {
+            self.header(name)
+        }
     }
 }
 
@@ -130,6 +144,9 @@ pub fn parse_request(data: &[u8]) -> Result<(Request, usize), ProtoError> {
         let name = trimmed(&line[..colon], MAX_NAME);
         let value = trimmed(&line[colon + 1..], MAX_VALUE);
         let lower = name.to_ascii_lowercase();
+        if String::from_utf8_lossy(&line[colon + 1..]).trim().len() > MAX_VALUE {
+            req.truncated_headers.push(lower.clone());
+        }
         let bit = match lower.as_str() {
             "host" => 1,
             "sec-websocket-key" => 2,
@@ -163,7 +180,14 @@ pub fn parse_request(data: &[u8]) -> Result<(Request, usize), ProtoError> {
             }
             _ => {}
         }
-        if req.headers.len() < MAX_HEADERS {
+        if let Some((_, previous)) = req
+            .headers
+            .iter_mut()
+            .find(|(n, _)| n.eq_ignore_ascii_case(&name))
+        {
+            previous.push_str(", ");
+            previous.push_str(&value);
+        } else if req.headers.len() < MAX_HEADERS {
             req.headers.push((name, value));
         }
     }
