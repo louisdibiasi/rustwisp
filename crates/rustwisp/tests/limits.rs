@@ -3,6 +3,33 @@
 
 mod common;
 
+#[test]
+fn idle_http_connections_count_toward_the_connection_cap() {
+    let cfg = rustwisp_config::Config {
+        flood: flood(|f| f.max_concurrent_connections = 2),
+        ..common::test_config()
+    };
+    let h = common::start(cfg);
+    let first = std::net::TcpStream::connect(("127.0.0.1", h.port())).unwrap();
+    let second = std::net::TcpStream::connect(("127.0.0.1", h.port())).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert!(upgrade_status(h.port(), "").contains("503"));
+    drop(first);
+    drop(second);
+    let deadline = std::time::Instant::now() + common::TIMEOUT;
+    loop {
+        if upgrade_status(h.port(), "").contains("101") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "connection slots did not recover"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    h.stop_and_join();
+}
+
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};

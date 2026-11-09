@@ -64,6 +64,12 @@ pub(crate) struct Conn {
 
 impl Conn {
     pub(crate) fn accept(cx: &mut Ctx, fd: OwnedFd, peer: Option<SocketAddr>) {
+        if !cx.sh.connections.try_acquire() {
+            Stats::inc(&cx.sh.stats.connections_total);
+            Stats::inc(&cx.sh.stats.refused_connection_limit);
+            let _ = sys::send(&fd, b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            return;
+        }
         let c = cx.cfg();
         sys::tune_tcp(&fd, c.tcp_nodelay, c.tcp_quickack, c.socket_buffer_size);
         let peer = peer.unwrap_or_else(|| SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0));
@@ -95,7 +101,7 @@ impl Conn {
                 throttled: false,
                 closing: false,
                 violations: 0,
-                conn_slot: false,
+                conn_slot: true,
                 sigdets: HashMap::new(),
                 pending_throttle_ms: 0,
                 tier: Tier::Normal,
@@ -108,6 +114,7 @@ impl Conn {
         });
         conn.link.sync_interest(cx);
         if conn.link.closing {
+            cx.sh.connections.release();
             cx.slab.release(token);
             return;
         }
@@ -379,20 +386,6 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
             );
             return used;
         }
-        if !cx.sh.connections.try_acquire() {
-            Stats::inc(&cx.sh.stats.refused_connection_limit);
-            let msg = b"at capacity
-";
-            self.http_reply(
-                cx,
-                503,
-                "Service Unavailable",
-                "text/plain; charset=utf-8",
-                msg,
-            );
-            return used;
-        }
-        self.link.conn_slot = true;
         let v2 = cx.cfg().enable_v2 && !req.ws_protocol.is_empty();
         if cx.cfg().password_required && !v2 {
             let msg = b"wisp-v2 with authentication required\n";
