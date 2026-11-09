@@ -70,7 +70,11 @@ fn name(msg: &[u8], start: usize) -> Result<(Vec<u8>, usize), Error> {
         if len & 0xc0 == 0xc0 {
             let next = *msg.get(at + 1).ok_or(Error::Invalid)?;
             end.get_or_insert(at + 2);
-            at = ((len as usize & 63) << 8) | next as usize;
+            let target = ((len as usize & 63) << 8) | next as usize;
+            if target >= at {
+                return Err(Error::Invalid);
+            }
+            at = target;
         } else if len == 0 {
             return Ok((out, end.unwrap_or(at + 1)));
         } else {
@@ -99,7 +103,11 @@ fn word(msg: &[u8], at: usize) -> Result<u16, Error> {
 }
 
 fn parse(msg: &[u8], id: u16, host: &str, kind: u16) -> Result<Answer, Error> {
-    if msg.len() < 12 || word(msg, 0)? != id || msg[2] & 0xf8 != 0x80 || word(msg, 4)? != 1 {
+    if !(12..=4096).contains(&msg.len())
+        || word(msg, 0)? != id
+        || msg[2] & 0xf8 != 0x80
+        || word(msg, 4)? != 1
+    {
         return Err(Error::Invalid);
     }
     let (question, mut at) = name(msg, 12)?;
@@ -118,9 +126,10 @@ fn parse(msg: &[u8], id: u16, host: &str, kind: u16) -> Result<Answer, Error> {
         _ => return Err(Error::Failed),
     }
     at += 4;
-    let mut answer = Answer::default();
+    let mut records = Vec::new();
     for _ in 0..word(msg, 6)? {
-        at = name(msg, at)?.1;
+        let (owner, next) = name(msg, at)?;
+        at = next;
         let rr = msg.get(at..at + 10).ok_or(Error::Invalid)?;
         let typ = u16::from_be_bytes([rr[0], rr[1]]);
         let class = u16::from_be_bytes([rr[2], rr[3]]);
@@ -128,25 +137,67 @@ fn parse(msg: &[u8], id: u16, host: &str, kind: u16) -> Result<Answer, Error> {
         let len = u16::from_be_bytes([rr[8], rr[9]]) as usize;
         at += 10;
         let data = msg.get(at..at + len).ok_or(Error::Invalid)?;
-        let ip = match (class, typ, len) {
-            (1, 1, 4) => Some(IpAddr::V4(Ipv4Addr::from(
-                <[u8; 4]>::try_from(data).unwrap(),
-            ))),
-            (1, 28, 16) => Some(IpAddr::V6(Ipv6Addr::from(
-                <[u8; 16]>::try_from(data).unwrap(),
-            ))),
-            _ => None,
-        };
-        if let Some(ip) = ip
-            && answer.addrs.len() < 16
-        {
-            answer.addrs.push(ip);
-            if answer.ttl == 0 || ttl < answer.ttl {
-                answer.ttl = ttl;
-            }
+        if class == 1 {
+            let alias = if typ == 5 {
+                let (target, end) = name(msg, at)?;
+                if end != at + len {
+                    return Err(Error::Invalid);
+                }
+                Some(target)
+            } else {
+                None
+            };
+            records.push((owner, typ, ttl, data, alias));
         }
         at += len;
     }
+    let mut answer = Answer::default();
+    let mut current = question;
+    let mut visited = Vec::new();
+    let mut ttl: Option<u32> = None;
+    loop {
+        if visited.contains(&current) {
+            return Err(Error::Invalid);
+        }
+        visited.push(current.clone());
+        let mut alias = None;
+        for (owner, typ, record_ttl, data, target) in &records {
+            if owner != &current {
+                continue;
+            }
+            if let Some(target) = target {
+                if alias.as_ref().is_some_and(|old| old != target) {
+                    return Err(Error::Invalid);
+                }
+                alias = Some(target.clone());
+                ttl = Some(ttl.map_or(*record_ttl, |old| old.min(*record_ttl)));
+            } else if *typ == kind {
+                let ip = match (typ, data.len()) {
+                    (1, 4) => Some(IpAddr::V4(Ipv4Addr::from(
+                        <[u8; 4]>::try_from(*data).unwrap(),
+                    ))),
+                    (28, 16) => Some(IpAddr::V6(Ipv6Addr::from(
+                        <[u8; 16]>::try_from(*data).unwrap(),
+                    ))),
+                    _ => None,
+                };
+                if let Some(ip) = ip {
+                    ttl = Some(ttl.map_or(*record_ttl, |old| old.min(*record_ttl)));
+                    if answer.addrs.len() < 16 {
+                        answer.addrs.push(ip);
+                    }
+                }
+            }
+        }
+        match alias {
+            Some(target) => {
+                answer.addrs.clear();
+                current = target;
+            }
+            None => break,
+        }
+    }
+    answer.ttl = ttl.unwrap_or(0);
     Ok(answer)
 }
 
@@ -181,7 +232,7 @@ fn query_one(
         socket
             .set_read_timeout(Some(left))
             .map_err(|_| Error::Retry)?;
-        let mut buf = [0; 4096];
+        let mut buf = [0; 4097];
         let n = match socket.recv(&mut buf) {
             Ok(n) => n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -232,6 +283,28 @@ pub(crate) fn lookup(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cname_answers_follow_only_the_question_chain() {
+        let mut msg = query("some.test", 1, 1).unwrap();
+        msg[2] = 0x81;
+        msg[7] = 3;
+        msg.extend_from_slice(b"\x05other\x04test\0");
+        msg.extend_from_slice(&[0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 127, 0, 0, 2]);
+        msg.extend_from_slice(b"\x05alias\x04test\0");
+        msg.extend_from_slice(&[0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 127, 0, 0, 1]);
+        msg.extend_from_slice(&[0xc0, 12, 0, 5, 0, 1, 0, 0, 0, 10, 0, 12]);
+        msg.extend_from_slice(b"\x05alias\x04test\0");
+        let found = parse(&msg, 1, "some.test", 1).unwrap();
+        assert_eq!(found.addrs, vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
+        assert_eq!(found.ttl, 10);
+    }
+
+    #[test]
+    fn forward_name_pointers_are_invalid() {
+        let msg = [0xc0, 2, 0];
+        assert!(name(&msg, 0).is_err());
+    }
     fn response(id: u16, kind: u16) -> Vec<u8> {
         let mut msg = query("some.test", id, kind).unwrap();
         msg[2] = 0x81;

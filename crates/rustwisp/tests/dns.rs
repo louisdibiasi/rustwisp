@@ -5,6 +5,39 @@ use rustwisp_proto::wisp::ptype;
 use std::net::UdpSocket;
 
 #[test]
+fn unrelated_dns_answer_cannot_redirect_a_stream() {
+    let dns = UdpSocket::bind("127.0.0.1:0").unwrap();
+    dns.set_read_timeout(Some(TIMEOUT)).unwrap();
+    let mut cfg = test_config();
+    cfg.dns_servers = vec![dns.local_addr().unwrap().to_string()];
+    let responder = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let mut buf = [0; 512];
+            let (n, peer) = dns.recv_from(&mut buf).unwrap();
+            let mut answer = buf[..n].to_vec();
+            answer[2] = 0x81;
+            answer[3] = 0x80;
+            if buf[n - 3] == 1 {
+                answer[7] = 1;
+                answer.extend_from_slice(b"\x05other\x04test\0");
+                answer.extend_from_slice(&[0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 127, 0, 0, 1]);
+            }
+            dns.send_to(&answer, peer).unwrap();
+        }
+    });
+    let echo = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    echo.set_nonblocking(true).unwrap();
+    let h = start(cfg);
+    let mut c = Client::v1(h.port());
+    c.connect_stream(1, 1, "some.test", echo.local_addr().unwrap().port());
+    c.send_packet(ptype::DATA, 1, b"probe");
+    c.expect_close(1, rustwisp_proto::wisp::close::UNREACHABLE);
+    assert!(echo.accept().is_err());
+    h.stop_and_join();
+    responder.join().unwrap();
+}
+
+#[test]
 fn stale_dns_reply_cannot_connect_a_reused_stream_id() {
     use std::net::TcpListener;
     use std::time::{Duration, Instant};
