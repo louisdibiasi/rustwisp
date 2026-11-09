@@ -1,10 +1,29 @@
 use rustwisp_config::LogLevel;
 use std::fmt::{self, Write as _};
 use std::io::Write as _;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::mpsc::{SyncSender, sync_channel};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static LEVEL: AtomicU8 = AtomicU8::new(1);
+static SINK: OnceLock<Option<SyncSender<String>>> = OnceLock::new();
+
+fn sink() -> Option<&'static SyncSender<String>> {
+    SINK.get_or_init(|| {
+        let (tx, rx) = sync_channel::<String>(256);
+        std::thread::Builder::new()
+            .name("rustwisp-log".into())
+            .spawn(move || {
+                while let Ok(line) = rx.recv() {
+                    let _ = std::io::stderr().lock().write(line.as_bytes());
+                }
+            })
+            .ok()
+            .map(|_| tx)
+    })
+    .as_ref()
+}
 
 pub fn set_level(level: LogLevel) {
     LEVEL.store(
@@ -69,7 +88,9 @@ fn emit(level: u8, tag: &str, args: fmt::Arguments<'_>) {
         ["debug", "info", "warn", "error"][level as usize]
     );
     line.0.push('\n');
-    let _ = std::io::stderr().lock().write(line.0.as_bytes());
+    if let Some(sink) = sink() {
+        let _ = sink.try_send(line.0);
+    }
 }
 
 pub fn debug(tag: &str, args: fmt::Arguments<'_>) {

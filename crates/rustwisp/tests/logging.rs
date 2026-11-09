@@ -14,6 +14,88 @@ use std::time::Instant;
 /// the tests one at a time means there is only ever one server.
 static ONE_SERVER_AT_A_TIME: Mutex<()> = Mutex::new(());
 
+struct Running(Child);
+impl Drop for Running {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn an_unread_log_pipe_does_not_block_a_worker() {
+    let _serial = ONE_SERVER_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let server = Running(
+        Command::new(env!("CARGO_BIN_EXE_rustwisp"))
+            .args([
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "0",
+                "--workers",
+                "1",
+                "--log-level",
+                "info",
+                "--flood-protection",
+                "off",
+                "--reputation",
+                "off",
+                "--connections-limit-per-ip",
+                "0",
+                "--connection-window-s",
+                "0",
+            ])
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let port = listening_port(&server.0);
+    let mut writer = common::Client::v1(port);
+    let mut probe = common::Client::v1(port);
+    probe
+        .sock
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    for sid in 1..=2048 {
+        writer.connect_stream(sid, 1, "127.0.0.1", 80);
+    }
+    probe.send_frame(rustwisp_proto::ws::opcode::PING, true, b"alive");
+    assert_eq!(
+        probe.recv_frame(),
+        (rustwisp_proto::ws::opcode::PONG, b"alive".to_vec())
+    );
+}
+
+#[test]
+fn closing_the_log_reader_does_not_terminate_the_server() {
+    let _serial = ONE_SERVER_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut server = Running(
+        Command::new(env!("CARGO_BIN_EXE_rustwisp"))
+            .args([
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "0",
+                "--workers",
+                "1",
+                "--log-level",
+                "debug",
+            ])
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let port = listening_port(&server.0);
+    drop(server.0.stderr.take());
+    let mut probe = common::Client::v1(port);
+    probe.connect_stream(1, 1, "127.0.0.1", 80);
+    probe.expect_close(1, rustwisp_proto::wisp::close::BLOCKED);
+}
+
 /// A TCP port nothing listens on right now, used as a dial target that must be refused.
 fn closed_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
