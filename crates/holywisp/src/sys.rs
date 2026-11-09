@@ -297,6 +297,13 @@ pub fn install_signal_handlers(fd: &OwnedFd) -> io::Result<()> {
     Ok(())
 }
 
+pub(crate) fn dns_id() -> io::Result<u16> {
+    use std::io::Read;
+    let mut bytes = [0; 2];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(u16::from_ne_bytes(bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

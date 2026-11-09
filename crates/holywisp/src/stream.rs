@@ -310,7 +310,16 @@ pub(crate) fn open(conn: &mut Conn, cx: &mut Ctx, id: u32, kind: u8, host: &str,
         Ok(Some(ip)) => open_literal(link, cx, &mut s, ip),
         Ok(None) => {
             s.serial = s.serial.wrapping_add(1);
-            let timeout = Duration::from_millis(u64::from(cx.cfg().dns_timeout_ms.max(1)));
+            let servers = cx
+                .cfg()
+                .dns_servers
+                .iter()
+                .filter(|s| crate::dns_client::server(s).is_some())
+                .count()
+                .min(8);
+            let attempts = if servers == 0 { 1 } else { 2 * servers as u64 };
+            let timeout =
+                Duration::from_millis(u64::from(cx.cfg().dns_timeout_ms.max(1)) * attempts + 100);
             cx.add_timer(timeout, link.reg.token, id, s.serial, TimerKind::Connect);
             cx.sh
                 .resolver

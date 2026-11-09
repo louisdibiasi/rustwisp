@@ -161,11 +161,28 @@ impl Server {
         };
         let webclient = pages::webclient_page(&cfg.webclient_wisp_url)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let servers = cfg
+            .dns_servers
+            .iter()
+            .filter_map(|value| {
+                let parsed = crate::dns_client::server(value);
+                if parsed.is_none() {
+                    log::warn(
+                        "dns",
+                        format_args!("ignoring malformed dns-server '{value}'"),
+                    );
+                }
+                parsed
+            })
+            .take(8)
+            .collect();
         let resolver = Resolver::new(
             cfg.resolver_threads,
             cfg.dns_ttl_s,
             cfg.dns_negative_ttl_s,
             cfg.dns_order,
+            servers,
+            Duration::from_millis(u64::from(cfg.dns_timeout_ms.max(1))),
         );
         let upstream = cfg
             .proxy

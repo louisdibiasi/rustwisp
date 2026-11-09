@@ -4,7 +4,7 @@
 //! and connects to the very same ones.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -127,7 +127,13 @@ fn lookup(host: &str, order: DnsOrder) -> Result<Vec<IpAddr>, ()> {
     }
 }
 
-fn worker_loop(rx: Arc<Mutex<Receiver<Job>>>, cache: Arc<Cache>, order: DnsOrder) {
+fn worker_loop(
+    rx: Arc<Mutex<Receiver<Job>>>,
+    cache: Arc<Cache>,
+    order: DnsOrder,
+    servers: Arc<Vec<SocketAddr>>,
+    timeout: Duration,
+) {
     loop {
         let job = {
             let Ok(guard) = rx.lock() else { return };
@@ -136,11 +142,27 @@ fn worker_loop(rx: Arc<Mutex<Receiver<Job>>>, cache: Arc<Cache>, order: DnsOrder
                 Err(_) => return,
             }
         };
-        let answer = lookup(&job.host, order);
-        let ttl = if answer.is_ok() {
-            cache.ttl
+        let (answer, ttl) = if servers.is_empty() {
+            let answer = lookup(&job.host, order);
+            let ttl = if answer.is_ok() {
+                cache.ttl
+            } else {
+                cache.negative_ttl
+            };
+            (answer, ttl)
         } else {
-            cache.negative_ttl
+            match crate::dns_client::lookup(&servers, &job.host, timeout) {
+                Ok(found) => {
+                    let ttl = if found.ttl == 0 {
+                        cache.ttl
+                    } else {
+                        cache.ttl.min(Duration::from_secs(u64::from(found.ttl)))
+                    };
+                    (Ok(order_addrs(found.addrs, order)), ttl)
+                }
+                Err(crate::dns_client::Error::Retry) => (Err(()), Duration::ZERO),
+                Err(_) => (Err(()), cache.negative_ttl),
+            }
         };
         if !ttl.is_zero()
             && let Ok(mut map) = cache.map.lock()
@@ -158,7 +180,15 @@ fn worker_loop(rx: Arc<Mutex<Receiver<Job>>>, cache: Arc<Cache>, order: DnsOrder
 }
 
 impl Resolver {
-    pub(crate) fn new(threads: u32, ttl_s: u32, negative_ttl_s: u32, order: DnsOrder) -> Resolver {
+    pub(crate) fn new(
+        threads: u32,
+        ttl_s: u32,
+        negative_ttl_s: u32,
+        order: DnsOrder,
+        servers: Vec<SocketAddr>,
+        timeout: Duration,
+    ) -> Resolver {
+        let servers = Arc::new(servers);
         let (tx, rx) = channel::<Job>();
         let rx = Arc::new(Mutex::new(rx));
         let cache = Arc::new(Cache {
@@ -168,11 +198,12 @@ impl Resolver {
             entries: AtomicU64::new(0),
         });
         for i in 0..threads.max(1) {
+            let servers = Arc::clone(&servers);
             let rx = Arc::clone(&rx);
             let cache = Arc::clone(&cache);
             let _ = std::thread::Builder::new()
                 .name(format!("hw-dns-{i}"))
-                .spawn(move || worker_loop(rx, cache, order));
+                .spawn(move || worker_loop(rx, cache, order, servers, timeout));
         }
         Resolver {
             tx: Mutex::new(tx),
@@ -258,7 +289,14 @@ mod tests {
     #[test]
     fn localhost_resolves_and_is_cached() {
         let mb = Mailbox::new().unwrap();
-        let r = Resolver::new(1, 60, 5, DnsOrder::Ipv4First);
+        let r = Resolver::new(
+            1,
+            60,
+            5,
+            DnsOrder::Ipv4First,
+            Vec::new(),
+            Duration::from_secs(1),
+        );
         r.submit("localhost", &mb, 1, 2, 3);
         for _ in 0..200 {
             let got = mb.take();

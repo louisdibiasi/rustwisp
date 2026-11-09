@@ -21,6 +21,8 @@ mod auth;
 mod conn;
 #[cfg(target_os = "linux")]
 mod dns;
+#[cfg(any(target_os = "linux", test))]
+mod dns_client;
 #[cfg(target_os = "linux")]
 mod link;
 #[cfg(target_os = "linux")]
