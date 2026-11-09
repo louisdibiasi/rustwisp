@@ -14,6 +14,7 @@ It speaks Wisp v1 and v2, so existing clients such as wisp-js and the browser cl
 - Egress rules that deny by default: no loopback, private ranges or literal IPs unless you turn them on, and the check runs on the addresses a name resolves to, not just the name.
 - Flood protection, per-IP limits, bandwidth pacing and an IP reputation store, all on by default and configurable.
 - Optional upstream proxy (SOCKS5 or HTTP CONNECT) for outbound TCP, and hashed passwords checked off the event loop.
+- Your own DNS servers (with fail-over) instead of the system resolver, log levels with timestamps, and optional Twisp terminal streams.
 
 ## Quick start
 
@@ -56,12 +57,10 @@ Measured with the `rustwisp-bench` tool in this repo (i7-13700KF, WSL2, loopback
 
 Take these as rough numbers. Loopback inside WSL is not a real network, runs differ by about 8 percent either way, and I have not repeated them on bare metal yet. The tool's own load generator tops out around 2 GiB/s on a single connection, so the 10-stream row understates the difference: an earlier test with a different generator saw about 1.9x there. Run `rustwisp-bench` yourself to check on your hardware; the [guide](docs/GUIDE.md#benchmarking) shows how.
 
-## Not done yet
+## Limits
 
-- Twisp (terminal streams) is not implemented. `enable-twisp` is accepted but nothing serves it.
+- Twisp (terminal streams) is a build-time feature and is off by default. Build with `--features twisp`, then set `enable-twisp = on`; it also needs Wisp v2 and a logged-in client. It runs programs on the server as the user the server runs as, with no sandbox, so read the [guide section](docs/GUIDE.md#terminal-streams-twisp) before turning it on. The release tarball does not include it.
 - `password-user` accepts plain text and bcrypt, SHA-256 and SHA-512 hashes. yescrypt (`$y$`) and MD5 are refused at startup.
-- `dns-server` (custom resolvers) is read but not used. Names are resolved with the system resolver.
-- Logging is minimal: startup and shutdown lines, nothing per connection.
 - The server has no config reload. Restart it to apply changes.
 - TLS is not built in. Run it behind nginx, Caddy or similar for `wss://`.
 

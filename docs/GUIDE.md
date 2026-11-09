@@ -10,16 +10,19 @@ This guide covers building the server, running it, configuring it, putting it on
 4. [What clients are allowed to reach](#what-clients-are-allowed-to-reach)
 5. [Passwords](#passwords)
 6. [Sending traffic through another proxy](#sending-traffic-through-another-proxy)
-7. [Behind a reverse proxy](#behind-a-reverse-proxy)
-8. [Running under systemd](#running-under-systemd)
-9. [Health and stats](#health-and-stats)
-10. [The web client](#the-web-client)
-11. [The command line client](#the-command-line-client)
-12. [Using the library](#using-the-library)
-13. [Close reasons](#close-reasons)
-14. [Troubleshooting](#troubleshooting)
-15. [Benchmarking](#benchmarking)
-16. [Working on the code](#working-on-the-code)
+7. [DNS servers](#dns-servers)
+8. [Logging](#logging)
+9. [Terminal streams (Twisp)](#terminal-streams-twisp)
+10. [Behind a reverse proxy](#behind-a-reverse-proxy)
+11. [Running under systemd](#running-under-systemd)
+12. [Health and stats](#health-and-stats)
+13. [The web client](#the-web-client)
+14. [The command line client](#the-command-line-client)
+15. [Using the library](#using-the-library)
+16. [Close reasons](#close-reasons)
+17. [Troubleshooting](#troubleshooting)
+18. [Benchmarking](#benchmarking)
+19. [Working on the code](#working-on-the-code)
 
 ## Build
 
@@ -66,6 +69,9 @@ The file is plain `key = value` lines. A `#` starts a comment. Booleans accept `
 | `enable-v2` | on | Offer Wisp v2 to clients that ask for it. |
 | `motd` | empty | Message of the day, sent to v2 clients. |
 | `connections-limit-per-ip` | 200 | New WebSockets per IP per window. |
+| `log-level` | `info` | How much the server writes to stderr. See [Logging](#logging). |
+| `dns-server` | empty | Resolve names with your own DNS servers. See [DNS servers](#dns-servers). |
+| `enable-twisp` | off | Terminal streams. Needs a special build; see [Terminal streams](#terminal-streams-twisp). |
 | `serve-webclient` | on | Serve the browser client on `GET /`. |
 
 The server checks the config at startup and refuses to run if a value is out of range, with the file and line in the message. There is no reload: restart to apply changes.
@@ -124,6 +130,51 @@ Some setups want the proxy to see the name, for example to route by domain. Set 
 UDP cannot go through these proxies. By default UDP streams are refused. `proxy-udp = direct` sends them straight out instead, bypassing the proxy, which may not be what you want if the proxy is there to hide the server's address.
 
 The proxy's own address is resolved once at startup; the server will not start if it cannot. `https://` proxies (TLS to the proxy) are not supported. A failed proxy handshake closes the stream with the matching reason: refused, blocked, unreachable or timed out.
+
+## DNS servers
+
+By default the server resolves names with the system resolver. To use specific servers instead, list them, one per line (up to eight):
+
+```
+dns-server = 1.1.1.1
+dns-server = [2606:4700:4700::1111]:53
+```
+
+The port is optional and defaults to 53. The servers are asked in the order you list them. Each one gets `dns-timeout-ms` (3000 by default) to answer a question; if it stays silent, sends garbage or answers with an error, the next one is tried. If both questions come back as "no such name", that is the answer and no other server is asked. The server asks for both the A and AAAA records over plain UDP and orders the result by `dns-order`. An answer that came back truncated counts as a failure, since there is no TCP fallback.
+
+Answers are cached for their own TTL, bounded by `dns-ttl-s`, and failures for `dns-negative-ttl-s`; set either to 0 to turn that cache off. The egress rules (see [What clients are allowed to reach](#what-clients-are-allowed-to-reach)) are applied to the addresses that come back, and the connection goes to the address that passed.
+
+Replies are accepted only from the server that was asked, on a fresh socket with a random source port and a random ID, and only when the question section matches. Nothing here makes plain DNS safe against someone who can see your traffic, so point it at a resolver on a network you trust.
+
+## Logging
+
+The server writes one line per event to stderr, which systemd sends to the journal:
+
+```
+2026-11-08T12:00:00.123Z [info] server: listening on 0.0.0.0:6001 with 4 workers
+```
+
+`log-level` picks what is written: `debug`, `info` (the default), `warn`, `error` or `none`. `info` covers startup, shutdown and the events worth noticing; `debug` adds a line for each connection accepted and closed, which is a lot on a busy server. Control characters in anything that came from a client are escaped, and passwords, login names and request headers are never logged.
+
+`log-blocked-dials = on` adds an `info` line each time a client asks for a destination the egress rules refuse. It is off by default because a scanner can produce a lot of them.
+
+## Terminal streams (Twisp)
+
+Twisp lets a Wisp v2 client open a stream that is a terminal on the server instead of a network connection. The client sends a stream of type `0x03` whose host field is the command to run. The server starts that command on a pseudo-terminal, passes bytes both ways, and closes the stream when the program exits or the client does. A packet of type `0xF0` with four bytes (rows, then columns, each a 16-bit little-endian number) resizes the terminal.
+
+This runs programs on your machine on behalf of whoever can log in, so it is off twice over:
+
+1. It is a build-time feature. Build with `cargo build --release --features twisp`. The release tarball does not include it, and a server built without it refuses every terminal stream.
+2. It needs `enable-twisp = on`, Wisp v2, and a client that has logged in with one of the `password-user` entries. Anything else gets close reason `0x48`, and the attempt counts against the client's reputation.
+
+What to know before you turn it on:
+
+- The command runs as the user the server runs as, with the same working directory and environment (plus `TERM=xterm-256color`). There is no sandbox and no privilege drop. Run the server as an unprivileged user, and think of the login as shell access.
+- The command line is split like a shell would split quotes and backslashes, but no shell is involved: there is no globbing, piping or variable expansion. To get those, run `sh -c '...'` yourself.
+- At most 32 terminals run at once per server. The ordinary connection limits apply as well.
+- When a stream ends, the server sends `SIGHUP` to the program's process group and escalates after a second. A program that starts a daemon in a new session is out of that group and keeps running.
+- A command that cannot start closes the stream with `0x03` straight away.
+- Terminal output uses the same flow-control window and queue limit as network streams, so a client that stops reading does not make the server hold unbounded output.
 
 ## Behind a reverse proxy
 
@@ -257,7 +308,7 @@ When a stream ends, the server says why with one byte.
 
 **Every stream closes with `0x48`.** The server's rules are blocking the destination. The usual causes are a literal IP address (set `allow-direct-ip = on` or use a hostname) and a target on loopback or the LAN (`allow-loopback`, `allow-private`). When testing, run `rustwisp --allow-loopback --allow-direct-ip`.
 
-**`0x42` on a name that works elsewhere.** The server resolves names itself. Check that the machine running it can resolve the name, and that `dns-order` suits your network (`ipv6first` or `verbatim` if you have IPv6 only).
+**`0x42` on a name that works elsewhere.** The server resolves names itself. Check that the machine running it can resolve the name, that `dns-order` suits your network (`ipv6first` or `verbatim` if you have IPv6 only), and, if you set `dns-server`, that those servers are reachable over UDP and answer. Run with `--log-level debug` to see what the server is doing.
 
 **Connections work for a while, then clients get refused.** You have probably hit `connections-limit-per-ip`, or every client looks like the same IP because the proxy's address is not listed in `trusted-proxy`.
 
