@@ -93,6 +93,11 @@ fn map_errno(e: Errno) -> u8 {
 /// `Some(ip)` for an IP literal (optionally in brackets), `None` for a name, `Err` for something that
 /// looks like a literal but is malformed.
 pub(crate) fn parse_literal(host: &str) -> Result<Option<IpAddr>, ()> {
+    let host = host.trim();
+    let host = host.strip_suffix('.').unwrap_or(host);
+    if host.is_empty() || host.ends_with('.') {
+        return Err(());
+    }
     let bracketed = host.len() >= 2 && host.starts_with('[') && host.ends_with(']');
     let inner = if bracketed {
         &host[1..host.len() - 1]

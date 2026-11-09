@@ -3,6 +3,40 @@
 
 mod common;
 
+#[test]
+fn normalized_numeric_targets_cannot_bypass_the_direct_ip_switch() {
+    let mut cfg = common::test_config();
+    cfg.allow_direct_ip = false;
+    let h = common::start(cfg);
+    let echo = common::echo_server();
+    let mut c = common::Client::v1(h.port());
+    for (sid, host) in [
+        "127.0.0.1.",
+        "127.0.0.1 ",
+        " 127.0.0.1",
+        "127.1.",
+        "0x7f000001.",
+        "0177.0.0.1.",
+        "2130706433.",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let sid = sid as u32 + 1;
+        c.connect_stream(sid, 1, host, echo);
+        c.send_packet(rustwisp_proto::wisp::ptype::DATA, sid, b"probe");
+        c.expect_close(
+            sid,
+            if sid <= 3 {
+                rustwisp_proto::wisp::close::BLOCKED
+            } else {
+                rustwisp_proto::wisp::close::INVALID_INFO
+            },
+        );
+    }
+    h.stop_and_join();
+}
+
 use common::*;
 use rustwisp::SpliceMode;
 use rustwisp_proto::wisp::{self, close, ptype, stream_type};
