@@ -1,7 +1,7 @@
 #![no_main]
 //! The small typed config values: proxy URLs, CIDRs, port sets and host lists.
 
-use holywisp_config::{Cidr, HostList, PortSet, ProxyUrl};
+use rustwisp_config::{Cidr, HostList, PortSet, ProxyUrl};
 use libfuzzer_sys::fuzz_target;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 

@@ -1,7 +1,7 @@
 #![no_main]
 //! Config files and command lines: bad input is an error with a message, never a panic.
 
-use holywisp_config::{Config, Parsed, parse_args};
+use rustwisp_config::{Config, Parsed, parse_args};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

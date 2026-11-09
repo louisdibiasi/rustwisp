@@ -1,5 +1,5 @@
 [package]
-name = "holywisp-fuzz"
+name = "rustwisp-fuzz"
 version = "0.0.0"
 edition = "2024"
 publish = false
@@ -13,10 +13,10 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
-holywisp-proto = { path = "../crates/holywisp-proto" }
-holywisp-config = { path = "../crates/holywisp-config" }
-holywisp-client = { path = "../crates/holywisp-client" }
-holywisp = { path = "../crates/holywisp" }
+rustwisp-proto = { path = "../crates/rustwisp-proto" }
+rustwisp-config = { path = "../crates/rustwisp-config" }
+rustwisp-client = { path = "../crates/rustwisp-client" }
+rustwisp = { path = "../crates/rustwisp" }
 
 [[bin]]
 name = "ws_header"

@@ -2,7 +2,7 @@
 //! Any bytes in: the WebSocket header parser never panics, and a header it accepts survives being
 //! written back out and parsed again.
 
-use holywisp_proto::ws::{self, MAX_HEADER};
+use rustwisp_proto::ws::{self, MAX_HEADER};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

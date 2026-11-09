@@ -1,0 +1,3 @@
+# systemd-sysusers: a fixed, locked system account for operators who set User=wisp instead of
+# DynamicUser. The home is the state dir and the shell is nologin.
+u wisp - "rustwisp Wisp server" /var/lib/rustwisp /usr/sbin/nologin

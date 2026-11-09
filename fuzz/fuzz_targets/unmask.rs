@@ -2,7 +2,7 @@
 //! The vectorised unmask agrees with the obvious byte-by-byte loop for every length, alignment and
 //! starting offset. Input layout: 4 mask bytes, 1 offset byte, then the payload.
 
-use holywisp_proto::simd;
+use rustwisp_proto::simd;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

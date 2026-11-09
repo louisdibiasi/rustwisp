@@ -1,0 +1,42 @@
+//! The rustwisp server: a Wisp v1/v2 proxy over WebSocket, a Rust rewrite of the C server.
+//!
+//! The policy modules (`egress`, `filter`, `buf`, `slab`, `stats`, `pages`) are plain Rust and
+//! build on every platform. The event loop, sockets and relay are Linux only.
+
+pub mod buf;
+pub mod egress;
+pub mod filter;
+pub mod limits;
+pub mod log;
+pub mod pages;
+pub mod password;
+pub mod proxy;
+pub mod reputation;
+pub mod slab;
+pub mod stats;
+
+#[cfg(target_os = "linux")]
+mod auth;
+#[cfg(target_os = "linux")]
+mod conn;
+#[cfg(target_os = "linux")]
+mod dns;
+#[cfg(any(target_os = "linux", test))]
+mod dns_client;
+#[cfg(target_os = "linux")]
+mod link;
+#[cfg(target_os = "linux")]
+mod server;
+#[cfg(target_os = "linux")]
+mod stream;
+#[cfg(target_os = "linux")]
+pub mod sys;
+#[cfg(all(target_os = "linux", feature = "twisp"))]
+mod twisp;
+#[cfg(target_os = "linux")]
+mod worker;
+
+#[cfg(target_os = "linux")]
+pub use server::{Server, ServerHandle};
+#[cfg(target_os = "linux")]
+pub use worker::SpliceMode;

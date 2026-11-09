@@ -1,4 +1,4 @@
-# holyWisp-rust guide
+# rustwisp guide
 
 This guide covers building the server, running it, configuring it, putting it on a real machine, and using the client library. For a short overview start with the [README](../README.md).
 
@@ -29,17 +29,17 @@ You need a Linux machine and Rust 1.88 or newer (install it with [rustup](https:
 cargo build --release
 ```
 
-That produces `target/release/holywisp` (the server) and `target/release/holywisp-cli` (the client tool). The release profile uses fat LTO and a single codegen unit, so the first build takes a little while.
+That produces `target/release/rustwisp` (the server) and `target/release/rustwisp-cli` (the client tool). The release profile uses fat LTO and a single codegen unit, so the first build takes a little while.
 
 To make a tarball with both binaries, the example config and the systemd files, run `deploy/make-release.sh`. It writes the archive and a sha256 checksum to `dist/`.
 
 ## Run
 
 ```sh
-holywisp                       # defaults: all interfaces, port 6001
-holywisp --port 7000
-holywisp --config /etc/holywisp/holywisp.conf
-holywisp --help
+rustwisp                       # defaults: all interfaces, port 6001
+rustwisp --port 7000
+rustwisp --config /etc/rustwisp/rustwisp.conf
+rustwisp --help
 ```
 
 Press Ctrl-C or send SIGTERM to stop it. Open connections are dropped and the reputation store is saved on the way out.
@@ -52,7 +52,7 @@ Settings come from a config file, from command line flags, or both. Every key in
 
 The file is plain `key = value` lines. A `#` starts a comment. Booleans accept `on`/`off`, `true`/`false`, `yes`/`no` and `1`/`0`. Keys that make lists (`allow-host`, `allow-port`, `trusted-proxy` and a few more) are repeated, one value per line. Wrap a value in double quotes if it contains spaces.
 
-[`holywisp.conf.example`](../holywisp.conf.example) lists every key with its default and a note. The ones you will touch most:
+[`rustwisp.conf.example`](../rustwisp.conf.example) lists every key with its default and a note. The ones you will touch most:
 
 | Key | Default | What it does |
 | --- | --- | --- |
@@ -144,7 +144,7 @@ location /wisp/ {
 }
 ```
 
-with this in `holywisp.conf`:
+with this in `rustwisp.conf`:
 
 ```
 host = 127.0.0.1
@@ -156,22 +156,22 @@ The server only reads those headers from addresses listed in `trusted-proxy`, so
 
 ## Running under systemd
 
-The tarball from `deploy/make-release.sh` contains a hardened unit file. It runs the server as a dedicated `wisp` user with no capabilities, a read-only filesystem apart from `/var/lib/holywisp`, a restricted set of system calls and only IPv4 and IPv6 sockets. To install it:
+The tarball from `deploy/make-release.sh` contains a hardened unit file. It runs the server as a dedicated `wisp` user with no capabilities, a read-only filesystem apart from `/var/lib/rustwisp`, a restricted set of system calls and only IPv4 and IPv6 sockets. To install it:
 
 ```sh
-sudo install -m 755 holywisp holywisp-cli /usr/bin/
-sudo install -D -m 644 systemd/holywisp.service /etc/systemd/system/holywisp.service
-sudo install -D -m 644 systemd/holywisp.sysusers /usr/lib/sysusers.d/holywisp.conf
-sudo install -D -m 644 systemd/holywisp.tmpfiles /usr/lib/tmpfiles.d/holywisp.conf
+sudo install -m 755 rustwisp rustwisp-cli /usr/bin/
+sudo install -D -m 644 systemd/rustwisp.service /etc/systemd/system/rustwisp.service
+sudo install -D -m 644 systemd/rustwisp.sysusers /usr/lib/sysusers.d/rustwisp.conf
+sudo install -D -m 644 systemd/rustwisp.tmpfiles /usr/lib/tmpfiles.d/rustwisp.conf
 sudo systemd-sysusers
 sudo systemd-tmpfiles --create
-sudo install -m 640 -g wisp holywisp.conf /etc/holywisp/holywisp.conf
-sudo systemctl enable --now holywisp
+sudo install -m 640 -g wisp rustwisp.conf /etc/rustwisp/rustwisp.conf
+sudo systemctl enable --now rustwisp
 ```
 
-The shipped `holywisp.conf` binds to `127.0.0.1`, which is what you want behind a proxy. Change `host` if the server should be reachable directly. To listen on a port below 1024, the comments in the unit explain the two lines to change.
+The shipped `rustwisp.conf` binds to `127.0.0.1`, which is what you want behind a proxy. Change `host` if the server should be reachable directly. To listen on a port below 1024, the comments in the unit explain the two lines to change.
 
-Check it with `systemctl status holywisp` and `journalctl -u holywisp`.
+Check it with `systemctl status rustwisp` and `journalctl -u rustwisp`.
 
 ## Health and stats
 
@@ -194,15 +194,15 @@ It cannot do TLS, so it only fetches plain `http://` pages. That is a limit of r
 ## The command line client
 
 ```
-holywisp-cli [options] WS_URL HOST PORT
+rustwisp-cli [options] WS_URL HOST PORT
 ```
 
 It reads standard input, sends it to HOST:PORT through the server at WS_URL, and writes the reply to standard output.
 
 ```sh
-printf 'GET / HTTP/1.0\r\n\r\n' | holywisp-cli ws://localhost:6001/ example.com 80
-holywisp-cli --udp ws://localhost:6001/ one.one.one.one 53 < query.bin > reply.bin
-holywisp-cli --user alice --pass 'correct horse' ws://host:6001/ example.com 22
+printf 'GET / HTTP/1.0\r\n\r\n' | rustwisp-cli ws://localhost:6001/ example.com 80
+rustwisp-cli --udp ws://localhost:6001/ one.one.one.one 53 < query.bin > reply.bin
+rustwisp-cli --user alice --pass 'correct horse' ws://host:6001/ example.com 22
 ```
 
 Options: `--udp` opens a UDP stream, `--v1` uses plain Wisp v1, `--user` and `--pass` supply a login, and `--wait SECS` sets how long to wait for more output once standard input ends (default 3). Only `ws://` is supported. For `wss://` servers, connect through a local TLS-aware tunnel.
@@ -214,7 +214,7 @@ The exit status is 0 for a normal finish, 1 if the connection failed or the serv
 Add the crate by path or git, then:
 
 ```rust
-use holywisp_client::{connect, Event, Options};
+use rustwisp_client::{connect, Event, Options};
 use std::io;
 
 fn main() -> io::Result<()> {
@@ -255,7 +255,7 @@ When a stream ends, the server says why with one byte.
 
 ## Troubleshooting
 
-**Every stream closes with `0x48`.** The server's rules are blocking the destination. The usual causes are a literal IP address (set `allow-direct-ip = on` or use a hostname) and a target on loopback or the LAN (`allow-loopback`, `allow-private`). When testing, run `holywisp --allow-loopback --allow-direct-ip`.
+**Every stream closes with `0x48`.** The server's rules are blocking the destination. The usual causes are a literal IP address (set `allow-direct-ip = on` or use a hostname) and a target on loopback or the LAN (`allow-loopback`, `allow-private`). When testing, run `rustwisp --allow-loopback --allow-direct-ip`.
 
 **`0x42` on a name that works elsewhere.** The server resolves names itself. Check that the machine running it can resolve the name, and that `dns-order` suits your network (`ipv6first` or `verbatim` if you have IPv6 only).
 
@@ -267,19 +267,19 @@ When a stream ends, the server says why with one byte.
 
 ## Benchmarking
 
-`holywisp-bench` puts servers side by side and reports what each one costs. It starts the server, a small counting echo service and a load generator itself, and it reads the server's CPU time, peak memory and context switches from `/proc`, so it needs Linux. It only talks to servers over the network, which means any Wisp server that takes the same flags can be a contender, the C holyWisp included.
+`rustwisp-bench` puts servers side by side and reports what each one costs. It starts the server, a small counting echo service and a load generator itself, and it reads the server's CPU time, peak memory and context switches from `/proc`, so it needs Linux. It only talks to servers over the network, which means any Wisp server that takes the same flags can be a contender, the C holyWisp included.
 
 ```sh
 cargo build --release
-target/release/holywisp-bench run \
+target/release/rustwisp-bench run \
     --server c=/path/to/holywisp-c/build/release/holywisp \
-    --server rust=target/release/holywisp \
+    --server rust=target/release/rustwisp \
     --out results.tsv
 ```
 
-The first `--server` is the baseline; the others are shown as a ratio against it. Each server gets `--port` and a set of flags that allow loopback targets and switch off the limiters, so the limits do not skew the result. Add your own options after the command, for example `--server rust4="target/release/holywisp --workers 4"`.
+The first `--server` is the baseline; the others are shown as a ratio against it. Each server gets `--port` and a set of flags that allow loopback targets and switch off the limiters, so the limits do not skew the result. Add your own options after the command, for example `--server rust4="target/release/rustwisp --workers 4"`.
 
-The scenarios follow the upstream benchmark, so the numbers can be read next to its tables. `holywisp-bench run --list` shows them:
+The scenarios follow the upstream benchmark, so the numbers can be read next to its tables. `rustwisp-bench run --list` shows them:
 
 | Scenario | What it does |
 | --- | --- |
@@ -294,7 +294,7 @@ Throughput is counted by the echo service, not by the client, in the window afte
 Useful options: `--scenarios native-1,rtt-64` runs part of the matrix, `--secs` and `--reps` set the length and the number of repetitions (the median is reported, with the range), and `--base-port` moves the ports. Repetitions are interleaved between servers, so slow drift in the machine hits all of them alike. To compare two saved runs, for example before and after a change:
 
 ```sh
-holywisp-bench compare before.tsv after.tsv
+rustwisp-bench compare before.tsv after.tsv
 ```
 
 It prints the ratio for each headline number and marks anything within 8 percent as noise, which is about how much two runs of the same build differ here.
@@ -305,11 +305,11 @@ A few things to keep in mind. Everything runs on one machine, so the load genera
 
 The workspace has five crates:
 
-- `holywisp-proto`: Wisp packets, WebSocket frame headers, the HTTP upgrade parser and the SIMD unmask routine. No I/O, so it is easy to test.
-- `holywisp-config`: the config file and flags.
-- `holywisp`: the server.
-- `holywisp-client`: the client library and `holywisp-cli`.
-- `holywisp-bench`: the benchmark tool described above.
+- `rustwisp-proto`: Wisp packets, WebSocket frame headers, the HTTP upgrade parser and the SIMD unmask routine. No I/O, so it is easy to test.
+- `rustwisp-config`: the config file and flags.
+- `rustwisp`: the server.
+- `rustwisp-client`: the client library and `rustwisp-cli`.
+- `rustwisp-bench`: the benchmark tool described above.
 
 ```sh
 cargo fmt --all --check

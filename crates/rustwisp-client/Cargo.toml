@@ -1,0 +1,22 @@
+[package]
+name = "rustwisp-client"
+description = "Blocking Wisp v1/v2 client library and a netcat-style command line tool"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "rustwisp_client"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rustwisp-cli"
+path = "src/main.rs"
+
+[dependencies]
+rustwisp-proto = { path = "../rustwisp-proto" }
+
+[lints]
+workspace = true

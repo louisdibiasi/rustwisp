@@ -1,4 +1,0 @@
-# systemd-tmpfiles: own the config and state directories for the static `wisp` user, 0750 so the
-# reputation store and config are not world-readable.
-d /etc/holywisp 0750 wisp wisp -
-d /var/lib/holywisp 0750 wisp wisp -

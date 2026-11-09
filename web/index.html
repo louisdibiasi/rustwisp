@@ -4,7 +4,7 @@
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<meta name="color-scheme" content="light dark" />
-		<title>holyWisp client</title>
+		<title>rustwisp client</title>
 		<link
 			rel="icon"
 			href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f766e'/%3E%3Cpath d='M6 20c3-8 6-8 10 0s7 8 10 0' fill='none' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E"
@@ -349,7 +349,7 @@
 
 			<footer>
 				A rewrite of the holyWisp client page for
-				<a href="https://github.com/louisdibiasi/holyWisp-rust">holyWisp-rust</a>. It works with any
+				<a href="https://github.com/louisdibiasi/rustwisp">rustwisp</a>. It works with any
 				server that speaks the <a href="https://github.com/MercuryWorkshop/wisp-protocol">Wisp protocol</a>.
 				Nothing you type leaves your browser except to the server you name.
 			</footer>
@@ -521,14 +521,14 @@
 			const store = {
 				get(k) {
 					try {
-						return localStorage.getItem('holywisp.' + k);
+						return localStorage.getItem('rustwisp.' + k);
 					} catch {
 						return null;
 					}
 				},
 				set(k, v) {
 					try {
-						localStorage.setItem('holywisp.' + k, v);
+						localStorage.setItem('rustwisp.' + k, v);
 					} catch {
 						/* private window: fine */
 					}
@@ -582,7 +582,7 @@
 				if (u.protocol !== 'http:') throw new Error('only http:// pages can be fetched (this page cannot do TLS)');
 				const port = u.port ? Number(u.port) : 80;
 				const hostHeader = port === 80 ? u.hostname : `${u.hostname}:${port}`;
-				const req = `GET ${u.pathname || '/'}${u.search} HTTP/1.1\r\nHost: ${hostHeader}\r\nUser-Agent: holywisp-web\r\nAccept: */*\r\nConnection: close\r\n\r\n`;
+				const req = `GET ${u.pathname || '/'}${u.search} HTTP/1.1\r\nHost: ${hostHeader}\r\nUser-Agent: rustwisp-web\r\nAccept: */*\r\nConnection: close\r\n\r\n`;
 				return { host: u.hostname.replace(/^\[|\]$/g, ''), port, request: enc.encode(req) };
 			}
 
@@ -709,7 +709,7 @@
 					if (v !== null) $(id).value = v;
 				}
 				// A page served by the Wisp server itself defaults to that server.
-				const cfg = window.HOLYWISP_CONFIG || {};
+				const cfg = window.RUSTWISP_CONFIG || {};
 				if (cfg.wisp) $('wisp').value = cfg.wisp;
 				else if (cfg.self && /^https?:$/.test(location.protocol) && !store.get('wisp')) {
 					$('wisp').value = `${location.origin.replace(/^http/, 'ws')}/`;

@@ -1,13 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["crates/holywisp-proto", "crates/holywisp-config", "crates/holywisp", "crates/holywisp-client", "crates/holywisp-bench"]
+members = ["crates/rustwisp-proto", "crates/rustwisp-config", "crates/rustwisp", "crates/rustwisp-client", "crates/rustwisp-bench"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "ISC"
-repository = "https://github.com/louisdibiasi/holyWisp-rust"
+repository = "https://github.com/louisdibiasi/rustwisp"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

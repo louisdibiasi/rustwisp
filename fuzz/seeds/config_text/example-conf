@@ -1,4 +1,4 @@
-# holywisp configuration. Every key is also a --key command-line flag; flags win.
+# rustwisp configuration. Every key is also a --key command-line flag; flags win.
 # Values are plain words or "quoted strings"; booleans are on/off, true/false, 1/0.
 # Lines starting with # are comments. Lists are built by repeating the key.
 
@@ -103,6 +103,6 @@ resolver-threads = 4
 tcp-nodelay = on
 tcp-quickack = on
 listen-backlog = 1024
-non-ws-response = "holyWisp: a Wisp server. Connect with a WebSocket client."
+non-ws-response = "rustwisp: a Wisp server. Connect with a WebSocket client."
 serve-webclient = on                # show the built-in browser client on GET /
 webclient-wisp-url =                # ws(s):// URL the web client offers by default; empty = this origin

@@ -4,8 +4,8 @@
 //! into the HTTP request it builds.
 
 use arbitrary::Arbitrary;
-use holywisp::proxy::{Handshake, Progress};
-use holywisp_config::ProxyKind;
+use rustwisp::proxy::{Handshake, Progress};
+use rustwisp_config::ProxyKind;
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Debug, Arbitrary)]

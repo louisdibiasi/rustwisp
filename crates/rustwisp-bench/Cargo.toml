@@ -1,0 +1,19 @@
+[package]
+name = "rustwisp-bench"
+description = "Benchmark harness for Wisp servers: throughput, latency and connection churn, with CPU and memory per byte"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "rustwisp-bench"
+path = "src/main.rs"
+
+[dependencies]
+rustwisp-client = { path = "../rustwisp-client" }
+
+[lints]
+workspace = true

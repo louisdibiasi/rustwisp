@@ -119,39 +119,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "holywisp"
-version = "0.1.0"
-dependencies = [
- "holywisp-config",
- "holywisp-proto",
- "libc",
- "pwhash",
- "rustix",
-]
-
-[[package]]
-name = "holywisp-bench"
-version = "0.1.0"
-dependencies = [
- "holywisp-client",
-]
-
-[[package]]
-name = "holywisp-client"
-version = "0.1.0"
-dependencies = [
- "holywisp-proto",
-]
-
-[[package]]
-name = "holywisp-config"
-version = "0.1.0"
-
-[[package]]
-name = "holywisp-proto"
-version = "0.1.0"
-
-[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -264,6 +231,39 @@ dependencies = [
  "linux-raw-sys",
  "windows-sys",
 ]
+
+[[package]]
+name = "rustwisp"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "pwhash",
+ "rustix",
+ "rustwisp-config",
+ "rustwisp-proto",
+]
+
+[[package]]
+name = "rustwisp-bench"
+version = "0.1.0"
+dependencies = [
+ "rustwisp-client",
+]
+
+[[package]]
+name = "rustwisp-client"
+version = "0.1.0"
+dependencies = [
+ "rustwisp-proto",
+]
+
+[[package]]
+name = "rustwisp-config"
+version = "0.1.0"
+
+[[package]]
+name = "rustwisp-proto"
+version = "0.1.0"
 
 [[package]]
 name = "sha-1"

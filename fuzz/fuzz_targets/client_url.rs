@@ -1,7 +1,7 @@
 #![no_main]
 //! The client's `ws://` address parser.
 
-use holywisp_client::WsUrl;
+use rustwisp_client::WsUrl;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|text: &str| {

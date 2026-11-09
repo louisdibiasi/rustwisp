@@ -2,7 +2,7 @@
 //! Any bytes in: the HTTP upgrade parsers never panic, never claim to have read more than they were
 //! given, and a request cannot make the server's `101` response carry extra header lines.
 
-use holywisp_proto::{http, webkey};
+use rustwisp_proto::{http, webkey};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

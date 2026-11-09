@@ -1,0 +1,28 @@
+[package]
+name = "rustwisp"
+description = "Wisp v1/v2 proxy server, a Rust rewrite of holyWisp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "rustwisp"
+path = "src/main.rs"
+
+[features]
+default = []
+twisp = ["rustix/pty", "rustix/process", "rustix/termios"]
+
+[dependencies]
+rustwisp-proto = { path = "../rustwisp-proto" }
+rustwisp-config = { path = "../rustwisp-config" }
+pwhash = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+rustix = { version = "1", features = ["event", "net", "pipe", "fs", "std", "time"] }
+
+[lints]
+workspace = true

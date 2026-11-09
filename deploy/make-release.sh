@@ -11,16 +11,16 @@ cd "$root"
 
 version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
 arch="$(uname -m)"
-name="holywisp-${version}-linux-${arch}"
+name="rustwisp-${version}-linux-${arch}"
 stage="dist/${name}"
 
-cargo build --release --locked -p holywisp -p holywisp-client
+cargo build --release --locked -p rustwisp -p rustwisp-client
 
 rm -rf "$stage"
 mkdir -p "$stage/systemd"
-cp target/release/holywisp target/release/holywisp-cli "$stage/"
-cp deploy/holywisp.conf "$stage/holywisp.conf"
-cp deploy/systemd/holywisp.service deploy/systemd/holywisp.sysusers deploy/systemd/holywisp.tmpfiles "$stage/systemd/"
+cp target/release/rustwisp target/release/rustwisp-cli "$stage/"
+cp deploy/rustwisp.conf "$stage/rustwisp.conf"
+cp deploy/systemd/rustwisp.service deploy/systemd/rustwisp.sysusers deploy/systemd/rustwisp.tmpfiles "$stage/systemd/"
 cp LICENSE "$stage/"
 [ -f README.md ] && cp README.md "$stage/"
 [ -f docs/GUIDE.md ] && cp docs/GUIDE.md "$stage/"

@@ -3,8 +3,8 @@
 //! Whatever the config says, a loopback or private address must stay blocked unless it was allowed.
 
 use arbitrary::Arbitrary;
-use holywisp::{egress, filter};
-use holywisp_config::{Cidr, Config};
+use rustwisp::{egress, filter};
+use rustwisp_config::{Cidr, Config};
 use libfuzzer_sys::fuzz_target;
 use std::net::IpAddr;
 
