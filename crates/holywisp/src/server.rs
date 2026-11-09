@@ -7,7 +7,8 @@ use std::sync::atomic::Ordering;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use holywisp_config::{Config, LogLevel};
+use crate::log;
+use holywisp_config::Config;
 use holywisp_proto::wisp::HEADER_LEN;
 
 use crate::auth::AuthPool;
@@ -122,9 +123,9 @@ fn maintenance(sh: &Shared) {
             if every > 0 && (now.saturating_sub(last_save) >= every || stopping) {
                 last_save = now;
                 if let Err(e) = r.save() {
-                    eprintln!(
-                        "holywisp: reputation: save to {}: {e}",
-                        sh.cfg.reputation.store_path
+                    log::warn(
+                        "reputation",
+                        format_args!("save to {}: {e}", sh.cfg.reputation.store_path),
                     );
                 }
             }
@@ -151,6 +152,7 @@ impl Server {
     }
 
     pub fn bind_with(cfg: Config, splice: SpliceMode) -> io::Result<Server> {
+        log::set_level(cfg.log_level);
         validate(&cfg).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         let count = if cfg.workers > 0 {
             cfg.workers as usize
@@ -215,9 +217,9 @@ impl Server {
         if let Some(r) = shared.reputation.as_ref()
             && let Err(e) = r.load()
         {
-            eprintln!(
-                "holywisp: reputation: load from {}: {e}",
-                shared.cfg.reputation.store_path
+            log::warn(
+                "reputation",
+                format_args!("load from {}: {e}", shared.cfg.reputation.store_path),
             );
         }
         let mut port = shared.cfg.port;
@@ -261,19 +263,15 @@ impl Server {
             mailboxes,
             port,
         } = self;
-        if shared.cfg.log_level != LogLevel::None && shared.cfg.log_level != LogLevel::Error {
-            eprintln!(
-                "holywisp: listening on {}:{} with {} worker{}",
-                if shared.cfg.host.is_empty() {
-                    "*"
-                } else {
-                    &shared.cfg.host
-                },
+        log::info(
+            "server",
+            format_args!(
+                "listening on {}:{} with {} workers",
+                shared.cfg.host,
                 port,
-                workers.len(),
-                if workers.len() == 1 { "" } else { "s" },
-            );
-        }
+                workers.len()
+            ),
+        );
         let mut threads = Vec::with_capacity(workers.len() + 1);
         for w in workers {
             threads.push(

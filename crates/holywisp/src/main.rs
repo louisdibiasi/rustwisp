@@ -28,28 +28,32 @@ fn run() -> i32 {
             return 2;
         }
     };
+    holywisp::log::set_level(cfg.log_level);
     let server = match Server::bind(cfg) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("holywisp: cannot start: {e}");
+            holywisp::log::error("server", format_args!("cannot start: {e}"));
             return 1;
         }
     };
     let stop_fd = match sys::wake_fd() {
         Ok(fd) => fd,
         Err(e) => {
-            eprintln!("holywisp: cannot start: {e}");
+            holywisp::log::error("server", format_args!("cannot start: {e}"));
             return 1;
         }
     };
     if let Err(e) = sys::install_signal_handlers(&stop_fd) {
-        eprintln!("holywisp: cannot install signal handlers: {e}");
+        holywisp::log::error(
+            "server",
+            format_args!("cannot install signal handlers: {e}"),
+        );
         return 1;
     }
     let handle = match server.start() {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("holywisp: cannot start: {e}");
+            holywisp::log::error("server", format_args!("cannot start: {e}"));
             return 1;
         }
     };
@@ -65,7 +69,7 @@ fn run() -> i32 {
             Err(_) => break,
         }
     }
-    eprintln!("holywisp: shutting down");
+    holywisp::log::info("server", format_args!("shutting down"));
     handle.stop_and_join();
     0
 }

@@ -60,7 +60,6 @@ pub(crate) struct Stream {
     pub remaining: u32,
     pub continue_due: bool,
     pub read_armed: bool,
-    #[allow(dead_code)] // kept for logs
     pub host: String,
     pub port: u16,
     pub addrs: Vec<SocketAddr>,
@@ -153,6 +152,10 @@ pub(crate) fn close_stream(link: &mut Link, cx: &mut Ctx, s: &mut Stream, reason
     if s.state == SState::Closed {
         return;
     }
+    crate::log::debug(
+        "stream",
+        format_args!("{}: stream {} closed: {reason:#x}", link.ip, s.id),
+    );
     s.state = SState::Closed;
     release_syn(cx, s);
     s.fd = None; // closing the descriptor removes it from epoll
@@ -296,6 +299,7 @@ pub(crate) fn open(conn: &mut Conn, cx: &mut Ctx, id: u32, kind: u8, host: &str,
         return;
     }
     if !filter::host_port_ok(cx.cfg(), host, port) {
+        crate::log::info("filter", format_args!("{}: blocked {host}:{port}", link.ip));
         Stats::inc(&cx.sh.stats.blocked_filter);
         link.send_close(cx, id, close::BLOCKED);
         return;
@@ -320,11 +324,19 @@ pub(crate) fn open(conn: &mut Conn, cx: &mut Ctx, id: u32, kind: u8, host: &str,
 
 fn open_literal(link: &mut Link, cx: &mut Ctx, s: &mut Stream, ip: IpAddr) {
     if !cx.cfg().allow_direct_ip {
+        crate::log::info(
+            "egress",
+            format_args!("{}: blocked {}:{}", link.ip, s.host, s.port),
+        );
         Stats::inc(&cx.sh.stats.blocked_egress);
         close_stream(link, cx, s, close::BLOCKED, true);
         return;
     }
     if egress::check(cx.cfg(), ip).is_err() {
+        crate::log::info(
+            "egress",
+            format_args!("{}: blocked {}:{}", link.ip, s.host, s.port),
+        );
         Stats::inc(&cx.sh.stats.blocked_egress);
         link.rep_source(cx, Event::PrivateEgress);
         close_stream(link, cx, s, close::BLOCKED, true);
@@ -363,6 +375,10 @@ pub(crate) fn on_resolved(
     }
     if s.addrs.is_empty() {
         if any_blocked {
+            crate::log::info(
+                "egress",
+                format_args!("{}: blocked {}:{}", link.ip, s.host, s.port),
+            );
             Stats::inc(&cx.sh.stats.blocked_egress);
             link.rep_source(cx, Event::PrivateEgress);
         }
@@ -442,10 +458,20 @@ fn connect_next(link: &mut Link, cx: &mut Ctx, s: &mut Stream, mut last: Errno) 
     if signature_record(link, cx, s, false) {
         return;
     }
+    if cx.cfg().flood.log_blocked_dials {
+        crate::log::info(
+            "flood",
+            format_args!("{}: dial to {}:{} failed: {last}", link.ip, s.host, s.port),
+        );
+    }
     close_stream(link, cx, s, map_errno(last), true);
 }
 
 fn connected(link: &mut Link, cx: &mut Ctx, s: &mut Stream) {
+    crate::log::debug(
+        "stream",
+        format_args!("{}: stream {} opened", link.ip, s.id),
+    );
     release_syn(cx, s);
     link.rep_source(cx, Event::SuccessfulStream);
     s.state = SState::Open;
@@ -747,6 +773,10 @@ pub(crate) fn on_data(link: &mut Link, cx: &mut Ctx, s: &mut Stream, data: &[u8]
     }
     if queued && !data.is_empty() {
         if s.out.len() + data.len() + 4 > cx.cfg().stream_queue_max as usize {
+            crate::log::debug(
+                "stream",
+                format_args!("{}: stream {} queue limit", link.ip, s.id),
+            );
             close_stream(link, cx, s, close::THROTTLED, true);
             return;
         }

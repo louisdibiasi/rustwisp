@@ -180,6 +180,7 @@ impl Link {
 
     /// Count a flood-protection violation; enough of them close the connection.
     pub(crate) fn violation(&mut self, cx: &Ctx) {
+        crate::log::debug("flood", format_args!("{}: throttled", self.ip));
         self.rep_source(cx, Event::ProtocolViolation);
         let limit = cx.cfg().flood.ws_close_after_violations;
         if limit == 0 {

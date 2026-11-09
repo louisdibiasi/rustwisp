@@ -208,7 +208,10 @@ impl Worker {
         while !self.cx.sh.stop.load(Ordering::Acquire) {
             let timeout = self.next_timeout();
             if let Err(e) = sys::epoll_wait(&self.cx.ep, &mut scratch, &mut events, timeout) {
-                eprintln!("holywisp: worker {}: epoll_wait: {e}", self.cx.index);
+                crate::log::error(
+                    "worker",
+                    format_args!("worker {}: epoll_wait: {e}", self.cx.index),
+                );
                 break;
             }
             for &(token, flags) in &events {
@@ -262,12 +265,15 @@ impl Worker {
                 Err(e) if e == sys::Errno::CONNABORTED => {}
                 Err(e) => {
                     if e == sys::Errno::MFILE || e == sys::Errno::NFILE {
-                        eprintln!(
-                            "holywisp: worker {}: out of file descriptors",
-                            self.cx.index
+                        crate::log::warn(
+                            "accept",
+                            format_args!("worker {}: out of file descriptors", self.cx.index),
                         );
                     } else {
-                        eprintln!("holywisp: worker {}: accept: {e}", self.cx.index);
+                        crate::log::warn(
+                            "accept",
+                            format_args!("worker {}: accept: {e}", self.cx.index),
+                        );
                     }
                     return;
                 }

@@ -7,6 +7,7 @@ pub mod buf;
 pub mod egress;
 pub mod filter;
 pub mod limits;
+pub mod log;
 pub mod pages;
 pub mod password;
 pub mod proxy;

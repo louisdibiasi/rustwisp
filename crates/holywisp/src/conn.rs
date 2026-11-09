@@ -67,6 +67,10 @@ impl Conn {
         let c = cx.cfg();
         sys::tune_tcp(&fd, c.tcp_nodelay, c.tcp_quickack, c.socket_buffer_size);
         let peer = peer.unwrap_or_else(|| SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0));
+        crate::log::debug(
+            "conn",
+            format_args!("{peer}: accepted on worker {}", cx.index),
+        );
         let ip = peer.ip().to_string();
         let stream_cap = c.max_streams_per_conn as usize;
         let handshake = Duration::from_millis(u64::from(c.handshake_timeout_ms.max(1)));
@@ -119,6 +123,7 @@ impl Conn {
 
     /// Free everything the connection holds. The descriptor closes when the value drops.
     pub(crate) fn teardown(&mut self, cx: &mut Ctx) {
+        crate::log::debug("conn", format_args!("{}: closed", self.link.ip));
         let link = &mut self.link;
         for s in self.streams.values_mut() {
             stream::close_stream(link, cx, s, close::UNKNOWN, false);
@@ -138,6 +143,10 @@ impl Conn {
         }
         if self.link.pending_throttle_ms > 0 {
             let wait = std::mem::take(&mut self.link.pending_throttle_ms);
+            crate::log::debug(
+                "conn",
+                format_args!("{}: bandwidth throttle {wait} ms", self.link.ip),
+            );
             self.link.throttled = true;
             self.link.sync_interest(cx);
             cx.add_timer(
@@ -425,6 +434,12 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
         if tier == Tier::Strict {
             Stats::inc(&cx.sh.stats.refused_reputation);
             return Err(());
+        }
+        if tier >= Tier::Warn {
+            crate::log::info(
+                "reputation",
+                format_args!("{}: tier {tier:?}", self.link.ip),
+            );
         }
         if tier >= Tier::Throttle {
             let cap = cx.cfg().max_streams_per_conn as usize;
