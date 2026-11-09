@@ -61,6 +61,10 @@ fn first_token(list: &str) -> String {
         .collect()
 }
 
+fn token_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
+}
+
 /// Parse a request head.
 ///
 /// Returns the request and the number of bytes consumed (through the blank line), `Err(Again)`
@@ -75,6 +79,14 @@ pub fn parse_request(data: &[u8]) -> Result<(Request, usize), ProtoError> {
         return Err(ProtoError::Protocol);
     }
     let text = &data[..head];
+    for (i, &b) in text.iter().enumerate() {
+        if (b == b'\r' && text.get(i + 1) != Some(&b'\n'))
+            || (b == b'\n' && (i == 0 || text[i - 1] != b'\r'))
+            || (b.is_ascii_control() && !matches!(b, b'\r' | b'\n' | b'\t'))
+        {
+            return Err(ProtoError::Protocol);
+        }
+    }
     let mut lines = text.split(|&b| b == b'\n');
 
     let request_line = lines.next().ok_or(ProtoError::Protocol)?;
@@ -89,7 +101,7 @@ pub fn parse_request(data: &[u8]) -> Result<(Request, usize), ProtoError> {
         .position(|&b| b == b' ')
         .ok_or(ProtoError::Protocol)?;
     let version = &rest[sp2 + 1..];
-    if !(version.starts_with(b"HTTP/1.1") || version.starts_with(b"HTTP/1.0")) {
+    if version != b"HTTP/1.1" && version != b"HTTP/1.0" {
         return Err(ProtoError::Protocol);
     }
     let mut req = Request {
@@ -102,6 +114,7 @@ pub fn parse_request(data: &[u8]) -> Result<(Request, usize), ProtoError> {
     }
 
     let (mut upgrade, mut connection, mut version13) = (false, false, false);
+    let mut unique = 0u8;
     for line in lines {
         let line = line.strip_suffix(b"\r").unwrap_or(line);
         if line.is_empty() {
@@ -111,15 +124,43 @@ pub fn parse_request(data: &[u8]) -> Result<(Request, usize), ProtoError> {
             .iter()
             .position(|&b| b == b':')
             .ok_or(ProtoError::Protocol)?;
+        if colon == 0 || colon > MAX_NAME || !line[..colon].iter().all(|&b| token_byte(b)) {
+            return Err(ProtoError::Protocol);
+        }
         let name = trimmed(&line[..colon], MAX_NAME);
         let value = trimmed(&line[colon + 1..], MAX_VALUE);
-        match name.to_ascii_lowercase().as_str() {
+        let lower = name.to_ascii_lowercase();
+        let bit = match lower.as_str() {
+            "host" => 1,
+            "sec-websocket-key" => 2,
+            "sec-websocket-version" => 4,
+            "sec-websocket-protocol" => 8,
+            _ => 0,
+        };
+        if unique & bit != 0 {
+            return Err(ProtoError::Protocol);
+        }
+        unique |= bit;
+        match lower.as_str() {
             "host" => req.host = value.clone(),
-            "upgrade" => upgrade = token_list_has(&value, "websocket"),
-            "connection" => connection = token_list_has(&value, "upgrade"),
-            "sec-websocket-key" => req.ws_key = value.clone(),
+            "upgrade" => upgrade |= token_list_has(&value, "websocket"),
+            "connection" => connection |= token_list_has(&value, "upgrade"),
+            "sec-websocket-key" => {
+                if crate::base64::decode(value.as_bytes()).is_none_or(|key| key.len() != 16) {
+                    return Err(ProtoError::Protocol);
+                }
+                req.ws_key = value.clone();
+            }
             "sec-websocket-version" => version13 = token_list_has(&value, "13"),
-            "sec-websocket-protocol" => req.ws_protocol = first_token(&value),
+            "sec-websocket-protocol" => {
+                if !value.split(',').all(|part| {
+                    let part = part.trim();
+                    !part.is_empty() && part.bytes().all(token_byte)
+                }) {
+                    return Err(ProtoError::Protocol);
+                }
+                req.ws_protocol = first_token(&value);
+            }
             _ => {}
         }
         if req.headers.len() < MAX_HEADERS {
@@ -222,6 +263,26 @@ mod tests {
              Connection: keep-alive, Upgrade\r\nSec-WebSocket-Key: {KEY}\r\n\
              Sec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: wisp-v2, other\r\n\r\n"
         )
+    }
+
+    #[test]
+    fn malformed_upgrade_headers_are_refused() {
+        for text in [
+            good().replace("HTTP/1.1", "HTTP/1.1junk"),
+            good().replace("Host:", " Host:"),
+            good().replace("Host:", "Host :"),
+            good().replace("example.org", "example\0.org"),
+            good().replace("example.org", "example\r.org"),
+            good().replace("GET /wisp/ HTTP/1.1\r\n", "GET /wisp/ HTTP/1.1\n"),
+            good().replace(KEY, "not-base64"),
+            good().replace(
+                "Sec-WebSocket-Key:",
+                "Sec-WebSocket-Key: x\r\nSec-WebSocket-Key:",
+            ),
+            good().replace("wisp-v2, other", "wisp-v2\0, other"),
+        ] {
+            assert!(parse_request(text.as_bytes()).is_err(), "{text:?}");
+        }
     }
 
     #[test]

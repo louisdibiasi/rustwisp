@@ -3,6 +3,32 @@
 
 mod common;
 
+#[test]
+fn malformed_upgrade_is_rejected_before_switching_protocols() {
+    let h = common::start(common::test_config());
+    for extra in [
+        "Sec-WebSocket-Key: other\r\n",
+        " Sec-WebSocket-Protocol: p\r\n",
+        "X-Control: a\0b\r\n",
+    ] {
+        let mut sock = std::net::TcpStream::connect(("127.0.0.1", h.port())).unwrap();
+        sock.set_read_timeout(Some(common::TIMEOUT)).unwrap();
+        let request = rustwisp_proto::http::upgrade_request(
+            "127.0.0.1",
+            h.port(),
+            "/",
+            "dGhlIHNhbXBsZSBub25jZQ==",
+            "p",
+            extra,
+        );
+        std::io::Write::write_all(&mut sock, request.as_bytes()).unwrap();
+        let mut response = [0; 512];
+        let n = std::io::Read::read(&mut sock, &mut response).unwrap();
+        assert!(response[..n].starts_with(b"HTTP/1.1 400"), "{response:?}");
+    }
+    h.stop_and_join();
+}
+
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
