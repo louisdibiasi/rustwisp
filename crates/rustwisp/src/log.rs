@@ -7,16 +7,29 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static LEVEL: AtomicU8 = AtomicU8::new(1);
-static SINK: OnceLock<Option<SyncSender<String>>> = OnceLock::new();
+static SINK: OnceLock<Option<SyncSender<Event>>> = OnceLock::new();
 
-fn sink() -> Option<&'static SyncSender<String>> {
+#[derive(Debug)]
+enum Event {
+    Line(String),
+    Flush(SyncSender<()>),
+}
+
+fn sink() -> Option<&'static SyncSender<Event>> {
     SINK.get_or_init(|| {
-        let (tx, rx) = sync_channel::<String>(256);
+        let (tx, rx) = sync_channel::<Event>(256);
         std::thread::Builder::new()
             .name("rustwisp-log".into())
             .spawn(move || {
-                while let Ok(line) = rx.recv() {
-                    let _ = std::io::stderr().lock().write(line.as_bytes());
+                while let Ok(event) = rx.recv() {
+                    match event {
+                        Event::Line(line) => {
+                            let _ = std::io::stderr().lock().write(line.as_bytes());
+                        }
+                        Event::Flush(done) => {
+                            let _ = done.send(());
+                        }
+                    }
                 }
             })
             .ok()
@@ -89,7 +102,17 @@ fn emit(level: u8, tag: &str, args: fmt::Arguments<'_>) {
     );
     line.0.push('\n');
     if let Some(sink) = sink() {
-        let _ = sink.try_send(line.0);
+        let _ = sink.try_send(Event::Line(line.0));
+    }
+}
+
+/// A blocked sink must not delay process shutdown indefinitely.
+pub fn flush() {
+    if let Some(Some(sink)) = SINK.get() {
+        let (tx, rx) = sync_channel(0);
+        if sink.try_send(Event::Flush(tx)).is_ok() {
+            let _ = rx.recv_timeout(std::time::Duration::from_millis(100));
+        }
     }
 }
 
@@ -117,5 +140,12 @@ mod tests {
         write!(line, "a\nb{}", "\u{e9}".repeat(2000)).unwrap();
         assert!(!line.0.contains('\n'));
         assert!(line.0.len() <= 1022);
+        let controls: String = (0..=159)
+            .filter_map(char::from_u32)
+            .filter(|ch| ch.is_control())
+            .collect();
+        let mut line = Line(String::new());
+        write!(line, "before{controls}after").unwrap();
+        assert!(line.0.chars().all(|ch| !ch.is_control()));
     }
 }

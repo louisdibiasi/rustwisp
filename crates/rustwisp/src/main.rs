@@ -2,7 +2,9 @@
 
 #[cfg(target_os = "linux")]
 fn main() {
-    std::process::exit(run());
+    let code = run();
+    rustwisp::log::flush();
+    std::process::exit(code);
 }
 
 #[cfg(target_os = "linux")]

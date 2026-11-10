@@ -274,3 +274,48 @@ fn malformed_credentials_are_not_printed_by_startup_errors() {
         );
     }
 }
+
+#[test]
+fn startup_failures_drain_their_diagnostic_before_exiting() {
+    for _ in 0..4 {
+        let mut server = Running(
+            Command::new(env!("CARGO_BIN_EXE_rustwisp"))
+                .args([
+                    "--host",
+                    "127.0.0.1",
+                    "--password-user",
+                    "user:$y$invalid",
+                    "--log-level",
+                    "error",
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let status = loop {
+            if let Some(status) = server.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "invalid configuration did not exit"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(status.code(), Some(1));
+        let mut error = String::new();
+        server
+            .0
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut error)
+            .unwrap();
+        assert!(
+            error.contains("yescrypt"),
+            "startup diagnostic was lost: {error:?}"
+        );
+    }
+}
