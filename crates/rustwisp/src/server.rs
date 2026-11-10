@@ -235,6 +235,7 @@ impl Server {
             reputation: cfg
                 .reputation_enabled
                 .then(|| Reputation::new(&cfg.reputation)),
+            rejections: Semaphore::new(64),
             bandwidth: Bandwidth::new(u64::from(cfg.bandwidth_limit_kbps) * 1000 / 8),
             stop: std::sync::atomic::AtomicBool::new(false),
             cfg,

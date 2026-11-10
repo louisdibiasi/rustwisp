@@ -339,3 +339,22 @@ fn reputation_survives_a_restart() {
     h.stop_and_join();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn capacity_rejections_finish_the_http_response_cleanly() {
+    let mut cfg = common::test_config();
+    cfg.flood = flood(|f| f.max_concurrent_connections = 1);
+    cfg.handshake_timeout_ms = 200;
+    let h = common::start(cfg);
+    let held = common::Client::v1(h.port());
+    for _ in 0..128 {
+        assert!(upgrade_status(h.port(), "").contains("503"));
+    }
+    let mut idle = std::net::TcpStream::connect(("127.0.0.1", h.port())).unwrap();
+    idle.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+        .unwrap();
+    assert_eq!(std::io::Read::read(&mut idle, &mut [0; 1024]).unwrap(), 0);
+    assert!(upgrade_status(h.port(), "").contains("503"));
+    drop(held);
+    h.stop_and_join();
+}

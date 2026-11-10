@@ -64,11 +64,13 @@ pub(crate) struct Conn {
 
 impl Conn {
     pub(crate) fn accept(cx: &mut Ctx, fd: OwnedFd, peer: Option<SocketAddr>) {
-        if !cx.sh.connections.try_acquire() {
-            Stats::inc(&cx.sh.stats.connections_total);
+        let conn_slot = cx.sh.connections.try_acquire();
+        if !conn_slot {
             Stats::inc(&cx.sh.stats.refused_connection_limit);
-            let _ = sys::send(&fd, b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-            return;
+            if !cx.sh.rejections.try_acquire() {
+                Stats::inc(&cx.sh.stats.connections_total);
+                return;
+            }
         }
         let c = cx.cfg();
         sys::tune_tcp(&fd, c.tcp_nodelay, c.tcp_quickack, c.socket_buffer_size);
@@ -79,7 +81,12 @@ impl Conn {
         );
         let ip = peer.ip().to_string();
         let stream_cap = c.max_streams_per_conn as usize;
-        let handshake = Duration::from_millis(u64::from(c.handshake_timeout_ms.max(1)));
+        let timeout = c.handshake_timeout_ms.max(1);
+        let handshake = Duration::from_millis(u64::from(if conn_slot {
+            timeout
+        } else {
+            timeout.min(1000)
+        }));
         let token = cx.slab.reserve();
         let mut conn = Box::new(Conn {
             link: Link {
@@ -101,7 +108,8 @@ impl Conn {
                 throttled: false,
                 closing: false,
                 violations: 0,
-                conn_slot: true,
+                conn_slot,
+                reject_slot: !conn_slot,
                 sigdets: HashMap::new(),
                 pending_throttle_ms: 0,
                 tier: Tier::Normal,
@@ -114,7 +122,11 @@ impl Conn {
         });
         conn.link.sync_interest(cx);
         if conn.link.closing {
-            cx.sh.connections.release();
+            if conn_slot {
+                cx.sh.connections.release();
+            } else {
+                cx.sh.rejections.release();
+            }
             cx.slab.release(token);
             return;
         }
@@ -139,6 +151,10 @@ impl Conn {
         if self.link.conn_slot {
             cx.sh.connections.release();
             self.link.conn_slot = false;
+        }
+        if self.link.reject_slot {
+            cx.sh.rejections.release();
+            self.link.reject_slot = false;
         }
         Stats::dec(&cx.sh.stats.connections_active);
     }
@@ -355,6 +371,16 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
                 return 0;
             }
         };
+        if !self.link.conn_slot {
+            self.http_reply(
+                cx,
+                503,
+                "Service Unavailable",
+                "text/plain; charset=utf-8",
+                b"",
+            );
+            return used;
+        }
         if !req.is_websocket {
             self.plain_reply(cx, &req);
             return used;

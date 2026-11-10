@@ -61,6 +61,7 @@ pub(crate) struct Shared {
     pub per_dest_min: Option<Window>,
     pub in_flight_syns: Semaphore,
     pub connections: Semaphore,
+    pub rejections: Semaphore,
     pub bandwidth: Option<Bandwidth>,
     pub reputation: Option<Reputation>,
     pub stop: std::sync::atomic::AtomicBool,

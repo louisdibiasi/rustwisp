@@ -101,6 +101,7 @@ pub(crate) struct Link {
     pub violations: u32,
     /// Holds one of the server-wide connection slots.
     pub conn_slot: bool,
+    pub reject_slot: bool,
     /// Per destination, the recent connect outcomes (SYN-flood signature).
     pub sigdets: HashMap<String, SigDet>,
     /// A bandwidth charge asked for a pause; the connection schedules it when the event is done.
