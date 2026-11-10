@@ -212,7 +212,14 @@ fn custom_resolver_reaches_local_echo() {
             let mut data = [0; 5];
             remote.read_exact(&mut data).unwrap();
             remote.write_all(&data).unwrap();
-            let packet = c.recv_packet();
+            // The first stream's remote hangs up as the loop moves on, so its CLOSE can still arrive
+            // while the second stream is being checked; only this stream's packet counts.
+            let packet = loop {
+                let packet = c.recv_packet();
+                if packet.sid == sid {
+                    break packet;
+                }
+            };
             assert_eq!(packet.payload, b"hello");
             c.send_packet(ptype::CLOSE, sid, &[0]);
         }
