@@ -14,5 +14,7 @@ Known limits:
   and environment. It is not a sandbox; a login grants shell access.
 - `proxy-send-hostnames = on` delegates name resolution and address enforcement
   to the upstream proxy. Use it only with a proxy that enforces its own egress rules.
-- Mixed password schemes or costs can reveal account types through login timing.
-  Use the same hash scheme and cost for every account.
+- Mixed password schemes or costs can reveal account types through login timing,
+  so startup refuses mixed profiles. Use plain text for all accounts or one hash
+  scheme, variant, cost and salt length. Network response times are not guaranteed
+  to be identical.

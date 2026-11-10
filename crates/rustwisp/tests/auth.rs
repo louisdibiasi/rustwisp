@@ -31,7 +31,7 @@ fn login_body(user: &str, pass: &str) -> Vec<u8> {
     body
 }
 
-fn hashed_config() -> Config {
+fn mixed_config() -> Config {
     let mut cfg = test_config();
     cfg.users = vec![
         user("alice", SHA512),
@@ -39,6 +39,13 @@ fn hashed_config() -> Config {
         user("carol", SHA256),
         user("dave", "plain-text"),
     ];
+    cfg.password_required = true;
+    cfg
+}
+
+fn hashed_config(secret: &str) -> Config {
+    let mut cfg = test_config();
+    cfg.users = vec![user("alice", secret), user("bob", secret)];
     cfg.password_required = true;
     cfg
 }
@@ -51,68 +58,94 @@ fn try_login(port: u16, who: &str, pass: &str) -> Packet {
 }
 
 #[test]
-fn failure_timing_samples_cover_mixed_password_schemes() {
-    let h = start(hashed_config());
-    for who in ["alice", "bob", "carol", "dave", "unknown"] {
-        let mut samples = Vec::new();
-        for _ in 0..12 {
-            let at = Instant::now();
-            let packet = try_login(h.port(), who, "wrong");
-            samples.push(at.elapsed().as_micros());
-            assert_eq!(
-                (packet.ptype, packet.payload),
-                (ptype::CLOSE, vec![close::AUTH_BAD_PASSWORD])
-            );
+fn failure_timing_samples_cover_uniform_password_profiles() {
+    for secret in [BCRYPT, SHA256, SHA512] {
+        let h = start(hashed_config(secret));
+        let mut medians = Vec::new();
+        for who in ["alice", "bob", "unknown"] {
+            let mut samples = Vec::new();
+            for _ in 0..12 {
+                let at = Instant::now();
+                let packet = try_login(h.port(), who, "wrong");
+                samples.push(at.elapsed().as_micros());
+                assert_eq!(
+                    (packet.ptype, packet.payload),
+                    (ptype::CLOSE, vec![close::AUTH_BAD_PASSWORD])
+                );
+            }
+            samples.sort_unstable();
+            println!("{who}: median_us={}", samples[samples.len() / 2]);
+            medians.push(samples[samples.len() / 2]);
         }
-        samples.sort_unstable();
-        println!("{who}: median_us={}", samples[samples.len() / 2]);
+        h.stop_and_join();
+        assert!(
+            medians.iter().max().unwrap() <= &(medians.iter().min().unwrap() * 2 + 1000),
+            "uniform profile failure timings differ: {medians:?}"
+        );
     }
-    h.stop_and_join();
+}
+
+#[test]
+fn mixed_password_work_profiles_are_refused_at_startup() {
+    assert!(rustwisp::Server::bind(mixed_config()).is_err());
+    for secret in [
+        BCRYPT.replace("$05$", "$06$"),
+        SHA512.to_string(),
+        "plain".into(),
+    ] {
+        let mut cfg = test_config();
+        cfg.users = vec![user("a", BCRYPT), user("b", &secret)];
+        assert!(rustwisp::Server::bind(cfg).is_err());
+    }
 }
 
 #[test]
 fn hashed_and_plain_users_can_log_in() {
-    let h = start(hashed_config());
-    for (who, pass) in [
-        ("alice", "Hello world!"),
-        ("bob", "U*U"),
-        ("carol", "Hello world!"),
-        ("dave", "plain-text"),
+    for (secret, pass) in [
+        (SHA512, "Hello world!"),
+        (BCRYPT, "U*U"),
+        (SHA256, "Hello world!"),
+        ("plain-text", "plain-text"),
     ] {
-        let p = try_login(h.port(), who, pass);
-        assert_eq!(
-            (p.ptype, p.sid),
-            (ptype::CONTINUE, 0),
-            "{who} should get in"
-        );
+        let h = start(hashed_config(secret));
+        for who in ["alice", "bob"] {
+            let p = try_login(h.port(), who, pass);
+            assert_eq!(
+                (p.ptype, p.sid),
+                (ptype::CONTINUE, 0),
+                "{who} should get in"
+            );
+        }
+        h.stop_and_join();
     }
-    h.stop_and_join();
 }
 
 #[test]
 fn wrong_passwords_and_unknown_names_are_refused() {
-    let h = start(hashed_config());
-    for (who, pass) in [
-        ("alice", "hello world!"),
-        ("bob", ""),
-        ("carol", "x"),
-        ("mallory", "Hello world!"),
-        ("dave", "plain-texT"),
-    ] {
-        let p = try_login(h.port(), who, pass);
-        assert_eq!(
-            (p.ptype, p.sid, p.payload.as_slice()),
-            (ptype::CLOSE, 0, &[close::AUTH_BAD_PASSWORD][..]),
-            "{who}"
-        );
+    for secret in [BCRYPT, SHA256, SHA512, "plain-text"] {
+        let h = start(hashed_config(secret));
+        for (who, pass) in [
+            ("alice", "hello world!"),
+            ("bob", ""),
+            ("carol", "x"),
+            ("mallory", "Hello world!"),
+            ("dave", "plain-texT"),
+        ] {
+            let p = try_login(h.port(), who, pass);
+            assert_eq!(
+                (p.ptype, p.sid, p.payload.as_slice()),
+                (ptype::CLOSE, 0, &[close::AUTH_BAD_PASSWORD][..]),
+                "{who}"
+            );
+        }
+        h.stop_and_join();
     }
-    h.stop_and_join();
 }
 
 #[test]
 fn a_login_after_a_hashed_check_still_works_on_a_new_connection() {
     // many logins in a row: the pool hands answers back to the right connections
-    let h = start(hashed_config());
+    let h = start(hashed_config(SHA512));
     let started = Instant::now();
     let mut clients: Vec<(Client, bool)> = (0..12)
         .map(|i| {

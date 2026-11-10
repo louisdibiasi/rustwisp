@@ -111,7 +111,7 @@ password-user = alice:$2b$12$...your hash...
 
 yescrypt (`$y$`) and MD5 (`$1$`) are not supported, and the server refuses to start with one in the config, naming the user, so nobody gets locked out by surprise.
 
-Checking a hash is slow on purpose, so it runs on two helper threads and not on the connection's own thread. A bounded queue sits in front of them: if more than 64 checks are waiting, new logins are refused until it drains. When every account uses the same kind of hash, a name that does not exist costs about the same as a wrong password, so response time does not say who has an account. With a mix of plain text, bcrypt and SHA hashes the times differ by kind, and a patient observer could tell some account types apart. If that matters, use one hash type for every account.
+Checking a hash is slow on purpose, so it runs on two helper threads and not on the connection's own thread. A bounded queue sits in front of them: if more than 64 checks are waiting, new logins are refused until it drains. All accounts must use plain text or one hash scheme, variant, cost and salt length; mixed configurations are refused at startup because they expose account types through login timing. For hashed accounts, an unknown name still costs one verification using the configured profile. This does not guarantee identical response times.
 
 ## Sending traffic through another proxy
 

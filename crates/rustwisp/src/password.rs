@@ -18,6 +18,94 @@ pub enum Scheme {
     Sha512Crypt,
 }
 
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, PartialEq, Eq)]
+struct WorkProfile {
+    scheme: Scheme,
+    rounds: u32,
+    salt_len: usize,
+    variant: u8,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn work_profile(secret: &str) -> Result<WorkProfile, &'static str> {
+    const MALFORMED: &str = "malformed password hash";
+    let scheme = scheme(secret)?;
+    let mut profile = WorkProfile {
+        scheme,
+        rounds: 0,
+        salt_len: 0,
+        variant: 0,
+    };
+    if scheme == Scheme::Plain {
+        return Ok(profile);
+    }
+    let encoded = |s: &str| {
+        s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'/')
+    };
+    if scheme == Scheme::Bcrypt {
+        let parts: Vec<_> = secret.split('$').collect();
+        if parts.len() != 4
+            || parts[2].len() != 2
+            || !parts[2].bytes().all(|b| b.is_ascii_digit())
+            || parts[3].len() != 53
+            || !encoded(parts[3])
+        {
+            return Err(MALFORMED);
+        }
+        profile.rounds = parts[2].parse().map_err(|_| MALFORMED)?;
+        if !(4..=31).contains(&profile.rounds) {
+            return Err(MALFORMED);
+        }
+        profile.variant = secret.as_bytes()[2];
+        profile.salt_len = 22;
+    } else {
+        let mut parts = secret[3..].split('$');
+        let first = parts.next().ok_or(MALFORMED)?;
+        let salt = if let Some(rounds) = first.strip_prefix("rounds=") {
+            profile.rounds = rounds
+                .parse::<u32>()
+                .map_err(|_| MALFORMED)?
+                .clamp(1000, 999_999_999);
+            parts.next().ok_or(MALFORMED)?
+        } else {
+            profile.rounds = 5000;
+            first
+        };
+        let checksum = parts.next().ok_or(MALFORMED)?;
+        let checksum_len = if scheme == Scheme::Sha256Crypt {
+            43
+        } else {
+            86
+        };
+        if parts.next().is_some()
+            || !encoded(salt)
+            || !encoded(checksum)
+            || checksum.len() != checksum_len
+        {
+            return Err(MALFORMED);
+        }
+        profile.salt_len = salt.len().min(16);
+    }
+    Ok(profile)
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn validate_profiles(users: &[rustwisp_config::User]) -> Result<(), &'static str> {
+    let mut expected = None;
+    for user in users {
+        let profile = work_profile(&user.secret)?;
+        if expected.as_ref().is_some_and(|first| first != &profile) {
+            return Err(
+                "password-user entries must all be plain text or use one hash scheme, variant, cost and salt length",
+            );
+        }
+        expected = Some(profile);
+    }
+    Ok(())
+}
+
 /// Work out the scheme of a stored secret. `Err` carries the reason a `$...` value is refused.
 pub fn scheme(secret: &str) -> Result<Scheme, &'static str> {
     if !secret.starts_with('$') {
@@ -71,6 +159,63 @@ mod tests {
     const BCRYPT: &str = "$2a$05$CCCCCCCCCCCCCCCCCCCCC.E5YPO9kmyuRGyh0XouQYb4YMJKvyOeW";
     const SHA256: &str = "$5$saltstring$5B8vYYiY.CVt1RlTTf8KbXBH3hsxY/GNooZaBBGWEc5";
     const SHA512: &str = "$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1";
+
+    #[test]
+    fn password_work_profiles_match_effective_parameters() {
+        let users = |secrets: &[&str]| {
+            secrets
+                .iter()
+                .enumerate()
+                .map(|(i, s)| rustwisp_config::User {
+                    name: format!("user{i}"),
+                    secret: (*s).into(),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(validate_profiles(&users(&["short", "longer plain password"])).is_ok());
+        assert!(validate_profiles(&users(&[BCRYPT, BCRYPT])).is_ok());
+        assert!(
+            validate_profiles(&users(&[
+                SHA512,
+                &SHA512.replace("saltstring", "newsaltstr")
+            ]))
+            .is_ok()
+        );
+        assert!(
+            validate_profiles(&users(&[
+                SHA512,
+                &SHA512.replacen("$6$", "$6$rounds=5000$", 1)
+            ]))
+            .is_ok()
+        );
+        for other in [
+            "plain".to_string(),
+            SHA256.to_string(),
+            BCRYPT.replace("$05$", "$06$"),
+            BCRYPT.replace("$2a$", "$2b$"),
+        ] {
+            assert!(validate_profiles(&users(&[BCRYPT, &other])).is_err());
+        }
+        assert!(
+            validate_profiles(&users(&[SHA512, &SHA512.replace("saltstring", "short")])).is_err()
+        );
+        assert!(
+            validate_profiles(&users(&[
+                SHA512,
+                &SHA512.replacen("$6$", "$6$rounds=6000$", 1)
+            ]))
+            .is_err()
+        );
+        for malformed in [
+            "$2a$05$bad",
+            "$2b$xx$bad",
+            "$6$",
+            "$5$rounds=x$salt$bad",
+            "$6$salt$bad",
+        ] {
+            assert!(work_profile(malformed).is_err());
+        }
+    }
 
     #[test]
     fn plain_text_matches_exactly() {

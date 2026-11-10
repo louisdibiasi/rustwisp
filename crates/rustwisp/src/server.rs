@@ -31,6 +31,7 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
             return Err(format!("password-user '{}': {why}", u.name));
         }
     }
+    password::validate_profiles(&cfg.users).map_err(str::to_string)?;
     if cfg.password_required && cfg.users.is_empty() {
         return Err("password-required needs at least one password-user".into());
     }
