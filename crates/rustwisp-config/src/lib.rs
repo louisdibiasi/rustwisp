@@ -85,11 +85,17 @@ pub struct ReputationConfig {
     pub dest_weights: BTreeMap<String, i32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct User {
     pub name: String,
     /// Plain text, or a crypt(3) hash (`$2b$`, `$6$`, `$y$`, ...).
     pub secret: String,
+}
+
+impl std::fmt::Debug for User {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("User").finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -465,7 +471,11 @@ impl Config {
 }
 
 fn bad_value(key: &str, v: &str) -> String {
-    format!("bad value '{v}' for '{key}'")
+    if matches!(key, "password-user" | "proxy") {
+        format!("bad value for '{key}'")
+    } else {
+        format!("bad value '{v}' for '{key}'")
+    }
 }
 
 /// A value from a config line: quoted text is kept verbatim up to the closing quote, anything
@@ -551,8 +561,8 @@ where
         let flag = a
             .strip_prefix("--")
             .ok_or_else(|| format!("unexpected argument '{a}'"))?;
-        if flag.len() >= 64 {
-            return Err(format!("option too long: {a}"));
+        if flag.split('=').next().unwrap_or(flag).len() >= 64 {
+            return Err("option too long".into());
         }
         if let Some((key, value)) = flag.split_once('=') {
             cfg.set(key, value)?;

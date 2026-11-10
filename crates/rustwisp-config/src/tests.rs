@@ -1,5 +1,34 @@
 use super::*;
 
+#[test]
+fn credential_errors_and_debug_output_are_redacted() {
+    let marker = "credential-marker-7319";
+    for value in [
+        format!(":{marker}"),
+        format!("{}:{marker}", "u".repeat(64)),
+        marker.to_string(),
+    ] {
+        let error = Config::default().set("password-user", &value).unwrap_err();
+        assert!(
+            !error.contains(marker),
+            "credential leaked through a config error"
+        );
+    }
+    let argument = format!("--password-user=:{}", marker.repeat(10));
+    let error = parse_args(&[argument.as_str()], no_files).unwrap_err();
+    assert!(
+        !error.contains(marker),
+        "credential leaked through a flag error"
+    );
+    let user = User {
+        name: "private-user".into(),
+        secret: marker.into(),
+    };
+    let debug = format!("{user:?}");
+    assert!(!debug.contains(marker));
+    assert!(!debug.contains("private-user"));
+}
+
 fn cfg_from(lines: &str) -> Result<Config, String> {
     let mut c = Config::default();
     c.load_text("test.conf", lines)?;

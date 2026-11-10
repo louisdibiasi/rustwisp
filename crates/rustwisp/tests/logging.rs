@@ -254,3 +254,23 @@ fn failed_dials_are_logged_only_when_requested() {
         assert_eq!(logs.contains("[info] flood:"), enabled, "{logs}");
     }
 }
+
+#[test]
+fn malformed_credentials_are_not_printed_by_startup_errors() {
+    let marker = "credential-marker-7319";
+    for argument in [
+        format!("--password-user=:{marker}"),
+        format!("--password-user=:{}", marker.repeat(10)),
+        format!("--proxy=http://user:{}@127.0.0.1:0", marker.repeat(10)),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_rustwisp"))
+            .args(["--host", "127.0.0.1", &argument, "--help"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains(marker),
+            "startup printed a credential"
+        );
+    }
+}
