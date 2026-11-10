@@ -143,11 +143,12 @@ fn relay(client: TcpStream, dest: TcpStream) {
 
 fn dial(target: &str) -> Option<TcpStream> {
     let (host, port) = target.rsplit_once(':')?;
-    let addr = (host, port.parse::<u16>().ok()?)
+    // A name can resolve to ::1 first while the test echo server listens on 127.0.0.1 only, as on
+    // many CI machines, so try every address as a real proxy would.
+    (host, port.parse::<u16>().ok()?)
         .to_socket_addrs()
         .ok()?
-        .next()?;
-    TcpStream::connect(addr).ok()
+        .find_map(|addr| TcpStream::connect(addr).ok())
 }
 
 fn serve_socks(
@@ -304,12 +305,6 @@ fn the_name_goes_to_the_proxy_only_when_asked_for() {
     );
     let mut cfg = via(&format!("socks5://127.0.0.1:{}", proxy.port));
     cfg.proxy_send_hostnames = true;
-    println!(
-        "localhost resolves to {:?}",
-        ("localhost", 0)
-            .to_socket_addrs()
-            .map(|a| a.collect::<Vec<_>>())
-    );
     let h = start(cfg);
     let mut c = Client::v1(h.port());
     open(&mut c, 1, "localhost", echo);

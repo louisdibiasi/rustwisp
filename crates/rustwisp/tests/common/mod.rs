@@ -363,7 +363,21 @@ pub fn udp_echo_server() -> u16 {
     port
 }
 
-/// A port nothing listens on.
+/// A port nothing listens on. On Linux the socket stays bound but never listens, so connecting is
+/// refused and no parallel test can be handed the same port, which a closed listener would allow.
+#[cfg(target_os = "linux")]
+pub fn closed_port() -> u16 {
+    use rustix::net::{AddressFamily, SocketAddrV4, SocketType, bind, getsockname, socket};
+    let fd = socket(AddressFamily::INET, SocketType::STREAM, None).unwrap();
+    bind(&fd, &SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = SocketAddrV4::try_from(getsockname(&fd).unwrap())
+        .unwrap()
+        .port();
+    std::mem::forget(fd);
+    port
+}
+
+#[cfg(not(target_os = "linux"))]
 pub fn closed_port() -> u16 {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     l.local_addr().unwrap().port()
