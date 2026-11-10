@@ -55,7 +55,7 @@ Measured with the `rustwisp-bench` tool in this repo (i7-13700KF, WSL2, loopback
 
 "Per CPU-second" is megabytes moved for each second of CPU the server used, which matters more than the raw rate when the machine has other work to do.
 
-Take these as rough numbers. Loopback inside WSL is not a real network, runs differ by about 8 percent either way, and I have not repeated them on bare metal yet. The tool's own load generator tops out around 2 GiB/s on a single connection, so the 10-stream row understates the difference: an earlier test with a different generator saw about 1.9x there. Run `rustwisp-bench` yourself to check on your hardware; the [guide](docs/GUIDE.md#benchmarking) shows how.
+Take these as rough numbers. Loopback inside WSL is not a real network, runs differ by about 8 percent either way, and I have not repeated them on bare metal yet. The tool's own load generator tops out around 2 GiB/s on a single connection, so the 10-stream row understates the difference: an earlier test with a different generator saw about 1.9x there. That other generator, the C project's own pump, gives 1.25x for one stream and 1.9x for ten, but only about 1.1x for ten streams with 1 MiB packets, the row where `rustwisp-bench` shows 1.7x. I have not found why the two disagree on that row, and it is the same before and after the latest changes, so do not quote it on its own. Run `rustwisp-bench` yourself to check on your hardware; the [guide](docs/GUIDE.md#benchmarking) shows how.
 
 ## Limits
 
