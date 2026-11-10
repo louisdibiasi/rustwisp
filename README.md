@@ -25,7 +25,7 @@ cargo build --release
 ./target/release/rustwisp --port 6001
 ```
 
-Open `http://localhost:6001/` for the built-in client, or point any Wisp client at `ws://localhost:6001/`.
+Open `http://localhost:6001/` for the built-in client, or point any Wisp client at `ws://localhost:6001/`. The same client page is published at [louisdibiasi.is-a.dev/rustwisp](https://louisdibiasi.is-a.dev/rustwisp/); it works with any Wisp server.
 
 By default the server refuses to connect to loopback and private addresses, so a test against a service on your own machine needs `--allow-loopback --allow-direct-ip` (or use a hostname).
 
