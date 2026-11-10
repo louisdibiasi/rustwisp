@@ -19,6 +19,7 @@ use crate::proxy::Upstream;
 use crate::reputation::Reputation;
 use crate::slab::Slab;
 use crate::stats::Stats;
+use crate::stream::SState;
 use crate::sys::{self, EventFlags};
 
 /// Bytes read from a client in one go.
@@ -31,6 +32,7 @@ pub(crate) const REMOTE_CHUNK: usize = 65_472;
 pub(crate) const SPLICE_CHUNK: usize = 512 * 1024;
 const PIPE_SIZE: usize = 1 << 20;
 const MAX_EVENTS: usize = 1024;
+const MAX_TIMERS: usize = 262_144;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpliceMode {
@@ -132,6 +134,7 @@ pub(crate) struct Ctx {
     pub rd: Vec<u8>,
     pub pipe: Option<(OwnedFd, OwnedFd)>,
     pub timers: BinaryHeap<Reverse<Timer>>,
+    last_timer_purge: Option<Instant>,
     next_serial: u64,
     pub mailbox: Arc<Mailbox>,
     pub index: usize,
@@ -154,7 +157,36 @@ impl Ctx {
         sid: u32,
         serial: u64,
         kind: TimerKind,
-    ) {
+    ) -> bool {
+        if self.timers.len() >= MAX_TIMERS {
+            let now = Instant::now();
+            if self
+                .last_timer_purge
+                .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(1))
+            {
+                self.last_timer_purge = Some(now);
+                let slab = &self.slab;
+                self.timers.retain(|Reverse(t)| match slab.get(t.conn) {
+                    Some(Entry::Conn(c)) if !c.link.closing => match TimerKind::from_code(t.kind) {
+                        TimerKind::Handshake => !c.link.handshake_done,
+                        TimerKind::Throttle => c.link.throttled,
+                        TimerKind::Connect => c.streams.get(&t.sid).is_some_and(|s| {
+                            s.serial == t.serial
+                                && matches!(
+                                    s.state,
+                                    SState::Resolving | SState::Connecting | SState::ProxyHandshake
+                                )
+                        }),
+                    },
+                    // A connection handling an event is temporarily absent from its reserved slot.
+                    None => slab.contains(t.conn),
+                    _ => false,
+                });
+            }
+            if self.timers.len() >= MAX_TIMERS {
+                return false;
+            }
+        }
         self.timers.push(Reverse(Timer {
             at: Instant::now() + after,
             conn,
@@ -162,6 +194,7 @@ impl Ctx {
             serial,
             kind: kind.code(),
         }));
+        true
     }
 }
 
@@ -201,6 +234,7 @@ impl Worker {
             rd: vec![0u8; 65_536],
             pipe,
             timers: BinaryHeap::new(),
+            last_timer_purge: None,
             next_serial: 0,
             mailbox,
             index,
@@ -316,5 +350,219 @@ impl Worker {
             let kind = TimerKind::from_code(t.kind);
             self.with_conn(t.conn, |c, cx| c.on_timer(cx, kind, t.sid, t.serial));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn worker() -> Worker {
+        configured_worker(None)
+    }
+
+    fn configured_worker(proxy: Option<rustwisp_config::ProxyUrl>) -> Worker {
+        let cfg = Config {
+            host: "127.0.0.1".into(),
+            port: 0,
+            workers: 1,
+            reputation_enabled: false,
+            allow_loopback: true,
+            allow_direct_ip: true,
+            connections_limit_per_ip: 0,
+            connection_window_s: 0,
+            proxy,
+            flood: rustwisp_config::FloodConfig {
+                max_concurrent_connections: 1,
+                ..Config::default().flood
+            },
+            ..Config::default()
+        };
+        crate::Server::bind(cfg).unwrap().take_test_worker()
+    }
+
+    fn socket_pair() -> (OwnedFd, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let (server, _) = listener.accept().unwrap();
+        server.set_nonblocking(true).unwrap();
+        (server.into(), client)
+    }
+
+    fn connection(cx: &mut Ctx) -> (u64, std::net::TcpStream) {
+        let (fd, client) = socket_pair();
+        Conn::accept(cx, fd, Some(client.local_addr().unwrap()));
+        (cx.timers.peek().unwrap().0.conn, client)
+    }
+
+    fn fill(cx: &mut Ctx, conn: u64) {
+        while cx.timers.len() < MAX_TIMERS {
+            assert!(cx.add_timer(
+                Duration::from_secs(3600),
+                conn,
+                cx.timers.len() as u32,
+                1,
+                TimerKind::Connect
+            ));
+        }
+    }
+
+    fn expect_throttled(client: &mut std::net::TcpStream, sid: u32) {
+        use std::io::Read;
+        let mut frame = [0u8; 8];
+        client.read_exact(&mut frame).unwrap();
+        assert_eq!(&frame[..2], &[0x82, 6]);
+        let packet = rustwisp_proto::wisp::parse(&frame[2..]).unwrap();
+        assert_eq!(packet.ptype, rustwisp_proto::wisp::ptype::CLOSE);
+        assert_eq!(packet.stream_id, sid);
+        assert_eq!(packet.payload, &[rustwisp_proto::wisp::close::THROTTLED]);
+    }
+
+    #[test]
+    fn long_deadlines_cannot_grow_the_timer_heap_without_bound() {
+        let mut worker = worker();
+        let cx = &mut worker.cx;
+        let conn = cx.slab.reserve();
+        for sid in 0..262_144 + 32 {
+            cx.add_timer(Duration::from_secs(3600), conn, sid, 1, TimerKind::Connect);
+        }
+        println!("long-deadline timers: {}", cx.timers.len());
+        assert!(cx.timers.len() <= 262_144);
+    }
+
+    #[test]
+    fn timer_capacity_preserves_taken_connections_and_limits_purging() {
+        let mut worker = worker();
+        let cx = &mut worker.cx;
+        let conn = cx.slab.reserve();
+        fill(cx, conn);
+        assert!(!cx.add_timer(Duration::from_secs(1), conn, 0, 1, TimerKind::Connect));
+        assert_eq!(cx.timers.len(), MAX_TIMERS);
+        let last = cx.last_timer_purge;
+        cx.slab.release(conn);
+        assert!(!cx.add_timer(Duration::from_secs(1), conn, 0, 1, TimerKind::Connect));
+        assert_eq!(cx.last_timer_purge, last);
+        cx.last_timer_purge = Some(Instant::now() - Duration::from_secs(1));
+        let replacement = cx.slab.reserve();
+        assert_ne!(conn, replacement);
+        assert!(cx.add_timer(
+            Duration::from_secs(1),
+            replacement,
+            0,
+            1,
+            TimerKind::Connect
+        ));
+        assert_eq!(cx.timers.len(), 1);
+    }
+
+    #[test]
+    fn stale_stream_and_finished_handshake_timers_are_pruned() {
+        let mut worker = worker();
+        let cx = &mut worker.cx;
+        let (token, _client) = connection(cx);
+        let Some(Entry::Conn(mut c)) = cx.slab.take(token) else {
+            panic!("connection missing")
+        };
+        c.link.handshake_done = true;
+        crate::stream::open(&mut c, cx, 7, 1, "waiting.invalid", 80);
+        let stream = c.streams.get_mut(&7).unwrap();
+        stream.serial = cx.next_serial();
+        let serial = stream.serial;
+        assert!(cx.add_timer(
+            Duration::from_secs(3600),
+            token,
+            7,
+            serial,
+            TimerKind::Connect
+        ));
+        crate::stream::open(&mut c, cx, 8, 1, "closed.invalid", 80);
+        let stream = c.streams.get_mut(&8).unwrap();
+        crate::stream::close_stream(&mut c.link, cx, stream, 1, false);
+        c.link.throttled = false;
+        assert!(cx.add_timer(Duration::from_secs(3600), token, 0, 0, TimerKind::Throttle));
+        cx.slab.put(token, Entry::Conn(c));
+        let dead = cx.slab.reserve();
+        fill(cx, dead);
+        cx.slab.release(dead);
+        assert!(cx.add_timer(Duration::from_secs(3600), token, 9, 1, TimerKind::Connect));
+        assert_eq!(cx.timers.len(), 2);
+        assert!(
+            cx.timers
+                .iter()
+                .any(|t| t.0.sid == 7 && t.0.serial == serial)
+        );
+        worker.with_conn(token, |c, _| c.link.close());
+        assert!(!worker.cx.slab.contains(token));
+    }
+
+    #[test]
+    fn timer_capacity_rejection_releases_connection_admission() {
+        let mut worker = worker();
+        let cx = &mut worker.cx;
+        let reserved = cx.slab.reserve();
+        fill(cx, reserved);
+        let before = cx.slab.len();
+        let (fd, client) = socket_pair();
+        Conn::accept(cx, fd, Some(client.local_addr().unwrap()));
+        assert_eq!(cx.slab.len(), before);
+        assert_eq!(cx.sh.connections.value(), 0);
+        assert_eq!(cx.sh.stats.connections_active.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn timer_capacity_refuses_resolves_connects_and_throttle_waits() {
+        let mut worker = worker();
+        let cx = &mut worker.cx;
+        let (token, mut client) = connection(cx);
+        let Some(Entry::Conn(mut c)) = cx.slab.take(token) else {
+            panic!("connection missing")
+        };
+        fill(cx, token);
+        crate::stream::open(&mut c, cx, 7, 1, "waiting.invalid", 80);
+        assert!(!c.streams.contains_key(&7));
+        expect_throttled(&mut client, 7);
+        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        crate::stream::open(
+            &mut c,
+            cx,
+            8,
+            1,
+            "127.0.0.1",
+            target.local_addr().unwrap().port(),
+        );
+        assert!(!c.streams.contains_key(&8));
+        expect_throttled(&mut client, 8);
+        assert_eq!(cx.sh.in_flight_syns.value(), 0);
+        assert_eq!(cx.sh.stats.streams_active.load(Ordering::Relaxed), 0);
+        c.link.pending_throttle_ms = 1000;
+        c.settle(cx);
+        assert!(c.is_closing());
+        c.teardown(cx);
+        assert_eq!(cx.sh.connections.value(), 0);
+    }
+
+    #[test]
+    fn timer_capacity_refuses_a_proxy_handshake_without_leaking_its_socket() {
+        let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("socks5://127.0.0.1:{}", proxy.local_addr().unwrap().port());
+        let mut worker = configured_worker(Some(url.parse().unwrap()));
+        let cx = &mut worker.cx;
+        let (token, mut client) = connection(cx);
+        let Some(Entry::Conn(mut c)) = cx.slab.take(token) else {
+            panic!("connection missing")
+        };
+        crate::stream::open(&mut c, cx, 7, 1, "127.0.0.1", 80);
+        assert_eq!(c.streams[&7].state, SState::Connecting);
+        let (_socket, _) = proxy.accept().unwrap();
+        fill(cx, token);
+        c.on_stream_event(cx, 7, sys::OUT);
+        assert!(!c.streams.contains_key(&7));
+        expect_throttled(&mut client, 7);
+        assert_eq!(cx.sh.in_flight_syns.value(), 0);
+        assert_eq!(cx.sh.stats.streams_active.load(Ordering::Relaxed), 0);
+        c.teardown(cx);
     }
 }

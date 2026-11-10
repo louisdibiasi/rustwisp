@@ -331,10 +331,13 @@ pub(crate) fn open(conn: &mut Conn, cx: &mut Ctx, id: u32, kind: u8, host: &str,
             let attempts = if servers == 0 { 1 } else { 2 * servers as u64 };
             let timeout =
                 Duration::from_millis(u64::from(cx.cfg().dns_timeout_ms.max(1)) * attempts + 100);
-            cx.add_timer(timeout, link.reg.token, id, s.serial, TimerKind::Connect);
-            cx.sh
-                .resolver
-                .submit(host, &cx.mailbox, link.reg.token, id, s.serial);
+            if cx.add_timer(timeout, link.reg.token, id, s.serial, TimerKind::Connect) {
+                cx.sh
+                    .resolver
+                    .submit(host, &cx.mailbox, link.reg.token, id, s.serial);
+            } else {
+                close_stream(link, cx, &mut s, close::THROTTLED, true);
+            }
         }
     }
     if s.state != SState::Closed {
@@ -487,7 +490,9 @@ fn connect_next(link: &mut Link, cx: &mut Ctx, s: &mut Stream, mut last: Errno) 
                     return;
                 }
                 let t = Duration::from_millis(u64::from(cx.cfg().connect_timeout_ms.max(1)));
-                cx.add_timer(t, link.reg.token, s.id, s.serial, TimerKind::Connect);
+                if !cx.add_timer(t, link.reg.token, s.id, s.serial, TimerKind::Connect) {
+                    close_stream(link, cx, s, close::THROTTLED, true);
+                }
                 return;
             }
             Err(e) => last = e,
@@ -597,7 +602,10 @@ fn start_proxy(link: &mut Link, cx: &mut Ctx, s: &mut Stream) {
     s.state = SState::ProxyHandshake;
     s.serial = cx.next_serial();
     let t = Duration::from_millis(u64::from(cx.cfg().connect_timeout_ms.max(1)));
-    cx.add_timer(t, link.reg.token, s.id, s.serial, TimerKind::Connect);
+    if !cx.add_timer(t, link.reg.token, s.id, s.serial, TimerKind::Connect) {
+        close_stream(link, cx, s, close::THROTTLED, true);
+        return;
+    }
     proxy_write(link, cx, s);
 }
 

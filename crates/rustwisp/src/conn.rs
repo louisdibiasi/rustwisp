@@ -132,7 +132,11 @@ impl Conn {
         }
         Stats::inc(&cx.sh.stats.connections_total);
         Stats::inc(&cx.sh.stats.connections_active);
-        cx.add_timer(handshake, token, 0, 0, TimerKind::Handshake);
+        if !cx.add_timer(handshake, token, 0, 0, TimerKind::Handshake) {
+            conn.teardown(cx);
+            cx.slab.release(token);
+            return;
+        }
         cx.slab.put(token, Entry::Conn(conn));
     }
 
@@ -172,13 +176,16 @@ impl Conn {
             );
             self.link.throttled = true;
             self.link.sync_interest(cx);
-            cx.add_timer(
+            if !cx.add_timer(
                 Duration::from_millis(wait),
                 self.link.reg.token,
                 0,
                 0,
                 TimerKind::Throttle,
-            );
+            ) {
+                self.link.close();
+                return;
+            }
         }
         let paused = self.link.reads_suspended();
         if paused == self.applied_paused {

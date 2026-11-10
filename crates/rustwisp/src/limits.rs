@@ -3,10 +3,11 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 /// Keys one limiter holds before it purges the expired ones on the spot.
 const MAX_WINDOW_KEYS: usize = 262_144;
+const MAX_BANDWIDTH_KEYS: usize = 262_144;
 const OVERFLOW_KEY: &str = "{0}overflow";
 /// The shared bucket for untracked keys admits this many clients worth of events per window.
 const OVERFLOW_FACTOR: u32 = 64;
@@ -142,6 +143,8 @@ impl Semaphore {
 pub struct Bandwidth {
     bytes_per_second: u64,
     buckets: Mutex<HashMap<String, (u64, u64)>>, // key -> (next_us, last_seen_ms)
+    overflow: Mutex<(u64, u64)>,
+    last_warning: AtomicU64,
 }
 
 impl Bandwidth {
@@ -149,6 +152,8 @@ impl Bandwidth {
         (bytes_per_second > 0).then(|| Bandwidth {
             bytes_per_second,
             buckets: Mutex::new(HashMap::new()),
+            overflow: Mutex::new((0, 0)),
+            last_warning: AtomicU64::new(0),
         })
     }
 
@@ -156,10 +161,40 @@ impl Bandwidth {
         if bytes == 0 {
             return 0;
         }
+        let mut map = lock(&self.buckets);
+        if let Some(b) = map.get_mut(key) {
+            return self.charge_bucket(b, bytes, now_ms);
+        }
+        if map.len() >= MAX_BANDWIDTH_KEYS {
+            drop(map);
+            let last = self.last_warning.load(Ordering::Relaxed);
+            if (last == 0 || now_ms.saturating_sub(last - 1) >= 60_000)
+                && self
+                    .last_warning
+                    .compare_exchange(
+                        last,
+                        now_ms.saturating_add(1),
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+            {
+                crate::log::warn(
+                    "bandwidth",
+                    format_args!(
+                        "source bucket capacity reached; new sources share overflow pacing"
+                    ),
+                );
+            }
+            return self.charge_bucket(&mut lock(&self.overflow), bytes, now_ms);
+        }
+        let b = map.entry(key.to_string()).or_insert((0, now_ms));
+        self.charge_bucket(b, bytes, now_ms)
+    }
+
+    fn charge_bucket(&self, b: &mut (u64, u64), bytes: usize, now_ms: u64) -> u64 {
         let now_us = now_ms * 1000;
         let cost_us = bytes as u64 * 1_000_000 / self.bytes_per_second;
-        let mut map = lock(&self.buckets);
-        let b = map.entry(key.to_string()).or_insert((0, now_ms));
         let earliest = now_us.saturating_sub(1_000_000);
         let start = b.0.max(earliest);
         let finish = start + cost_us;
@@ -174,6 +209,10 @@ impl Bandwidth {
     pub fn evict(&self, idle_ms: u64, now_ms: u64) {
         let cutoff = now_ms.saturating_sub(idle_ms);
         lock(&self.buckets).retain(|_, (_, seen)| *seen >= cutoff);
+        let mut overflow = lock(&self.overflow);
+        if overflow.1 < cutoff {
+            *overflow = (0, now_ms);
+        }
     }
 }
 
@@ -283,6 +322,38 @@ mod tests {
         );
         assert_eq!(b.charge("other", 500, 10_000), 0, "keys are separate");
         assert!(Bandwidth::new(0).is_none());
+    }
+
+    #[test]
+    fn distinct_sources_cannot_grow_bandwidth_buckets_without_bound() {
+        let b = Bandwidth::new(1000).unwrap();
+        for i in 0..262_144 + 32 {
+            b.charge(&format!("source-{i}"), 1, 10_000);
+        }
+        let count = lock(&b.buckets).len();
+        println!("distinct-source bandwidth buckets: {count}");
+        assert!(count <= 262_144);
+    }
+
+    #[test]
+    fn bandwidth_overflow_is_paced_and_warns_once_per_minute() {
+        let b = Bandwidth::new(1000).unwrap();
+        for i in 0..MAX_BANDWIDTH_KEYS {
+            b.charge(&format!("source-{i}"), 1, 10_000);
+        }
+        assert_eq!(b.charge("overflow-a", 1000, 10_000), 0);
+        assert_eq!(b.charge("overflow-b", 1000, 10_000), 1000);
+        assert_eq!(b.last_warning.load(Ordering::Relaxed), 10_001);
+        b.charge("overflow-c", 1, 69_999);
+        assert_eq!(b.last_warning.load(Ordering::Relaxed), 10_001);
+        b.charge("overflow-d", 1, 70_000);
+        assert_eq!(b.last_warning.load(Ordering::Relaxed), 70_001);
+        assert_eq!(b.charge("source-0", 500, 10_000), 0);
+        assert_eq!(lock(&b.buckets).len(), MAX_BANDWIDTH_KEYS);
+        b.evict(600_000, 1_000_000);
+        assert!(lock(&b.buckets).is_empty());
+        assert_eq!(b.charge("fresh", 1000, 1_000_000), 0);
+        assert_eq!(lock(&b.buckets).len(), 1);
     }
 
     #[test]

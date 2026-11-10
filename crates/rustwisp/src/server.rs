@@ -153,6 +153,11 @@ pub struct Server {
 }
 
 impl Server {
+    #[cfg(test)]
+    pub(crate) fn take_test_worker(&mut self) -> Worker {
+        self.workers.pop().unwrap()
+    }
+
     /// Bind with the splice mode from `RUSTWISP_SPLICE` (`off`, `always`, default adaptive).
     pub fn bind(cfg: Config) -> io::Result<Server> {
         Server::bind_with(cfg, splice_mode())
