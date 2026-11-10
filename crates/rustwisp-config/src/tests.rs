@@ -55,7 +55,9 @@ fn defaults_match_the_c_server() {
     assert_eq!(c.buffer_remaining, 128);
     assert_eq!(c.max_message_size, 1_048_581);
     assert_eq!(c.ws_write_high_water, 8_388_608);
-    assert_eq!(c.stream_queue_max, 16_777_216);
+    assert_eq!(c.stream_queue_max, 134_217_728);
+    assert_eq!(c.conn_queue_max, 268_435_456);
+    assert_eq!(c.client_recv_buffer, 8_388_608);
     assert_eq!(c.max_streams_per_conn, 2048);
     assert_eq!(c.connections_limit_per_ip, 200);
     assert_eq!(
@@ -81,6 +83,22 @@ fn the_shipped_example_file_loads_cleanly() {
     // the example repeats trusted-header, which appends to the two defaults
     assert!(c.trusted_headers.len() >= 2);
     assert_eq!(c.max_message_size, 1_048_581);
+}
+
+#[test]
+fn upload_queue_options_accept_their_full_unsigned_ranges() {
+    let mut c = Config::default();
+    for key in ["stream-queue-max", "conn-queue-max"] {
+        for value in ["4096", "2147483647", "2147483648"] {
+            c.set(key, value).unwrap();
+        }
+        for value in ["4095", "2147483649", "-1", "18446744073709551616"] {
+            assert!(c.set(key, value).is_err(), "{key}={value}");
+        }
+    }
+    c.set("client-recv-buffer", "0").unwrap();
+    c.set("client-recv-buffer", "1073741824").unwrap();
+    assert!(c.set("client-recv-buffer", "1073741825").is_err());
 }
 
 #[test]

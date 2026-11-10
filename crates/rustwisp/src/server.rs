@@ -26,6 +26,9 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
     if cfg.max_message_size < 5 {
         return Err("max-message-size must be at least 5".into());
     }
+    if cfg.conn_queue_max < cfg.stream_queue_max {
+        return Err("conn-queue-max must be at least stream-queue-max".into());
+    }
     for u in &cfg.users {
         if let Err(why) = password::scheme(&u.secret) {
             return Err(format!("password-user '{}': {why}", u.name));
@@ -54,12 +57,12 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
 }
 
 /// The CONTINUE window actually advertised: `buffer-remaining`, capped so a whole window of
-/// maximum-size DATA packets fits in half of `stream-queue-max`.
+/// maximum-size DATA packets fits in `stream-queue-max`.
 pub fn ingress_window(cfg: &Config) -> u32 {
     let payload = (cfg.max_message_size as usize)
         .saturating_sub(HEADER_LEN)
         .max(1);
-    let by_memory = (cfg.stream_queue_max as usize / 2 / payload).max(1);
+    let by_memory = (cfg.stream_queue_max as usize / payload).max(1);
     u32::try_from(by_memory)
         .unwrap_or(u32::MAX)
         .min(cfg.buffer_remaining)
@@ -207,6 +210,7 @@ impl Server {
             .iter()
             .any(|u| password::scheme(&u.secret) != Ok(Scheme::Plain));
         let shared = Arc::new(Shared {
+            client_rcvbuf: crate::sys::client_recv_buffer(&cfg),
             window: ingress_window(&cfg),
             stats: Stats::new(),
             webclient,
@@ -372,11 +376,16 @@ mod tests {
     #[test]
     fn window_is_capped_by_the_queue_budget() {
         let mut c = Config::default();
-        assert_eq!(ingress_window(&c), 8, "16 MiB queue / 2 / 1 MiB packets");
+        assert_eq!(ingress_window(&c), 128, "128 MiB queue / 1 MiB packets");
         c.max_message_size = 65_541;
         assert_eq!(ingress_window(&c), 128);
         c.buffer_remaining = 4;
         assert_eq!(ingress_window(&c), 4);
+        c.stream_queue_max = 4 * 65_536;
+        c.buffer_remaining = 128;
+        assert_eq!(ingress_window(&c), 4);
+        c.conn_queue_max = c.stream_queue_max - 1;
+        assert!(validate(&c).unwrap_err().contains("conn-queue-max"));
     }
 
     #[test]

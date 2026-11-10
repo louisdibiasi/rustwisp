@@ -47,6 +47,7 @@ pub(crate) struct Shared {
     pub cfg: Config,
     /// The CONTINUE window actually advertised (`buffer-remaining`, capped by `stream-queue-max`).
     pub window: u32,
+    pub client_rcvbuf: usize,
     pub stats: Stats,
     pub webclient: Vec<u8>,
     pub splice: SpliceMode,
@@ -419,6 +420,58 @@ mod tests {
         assert_eq!(packet.ptype, rustwisp_proto::wisp::ptype::CLOSE);
         assert_eq!(packet.stream_id, sid);
         assert_eq!(packet.payload, &[rustwisp_proto::wisp::close::THROTTLED]);
+    }
+
+    #[test]
+    fn upload_budget_counts_pending_streams_and_releases_on_close() {
+        let mut worker = worker();
+        let cfg = &mut Arc::get_mut(&mut worker.cx.sh).unwrap().cfg;
+        cfg.stream_queue_max = 1 << 20;
+        cfg.conn_queue_max = 2 << 20;
+        let cx = &mut worker.cx;
+        let (token, _client) = connection(cx);
+        let Some(Entry::Conn(mut c)) = cx.slab.take(token) else {
+            panic!("missing connection")
+        };
+        for sid in [1, 2, 3] {
+            crate::stream::open(&mut c, cx, sid, 1, "waiting.invalid", 80);
+            let s = c.streams.get_mut(&sid).unwrap();
+            crate::stream::on_data(&mut c.link, cx, s, &vec![1; 768 << 10]);
+        }
+        assert_eq!(c.link.queued_out, 2304 << 10);
+        assert!(c.link.read_paused);
+        assert!(c.link.want().contains(EventFlags::RDHUP));
+        assert!(!c.link.want().contains(EventFlags::IN));
+        assert_eq!(c.link.live_streams, 3);
+        for sid in [1, 2] {
+            let s = c.streams.get_mut(&sid).unwrap();
+            crate::stream::close_stream(&mut c.link, cx, s, 1, false);
+        }
+        assert_eq!(c.link.queued_out, 768 << 10);
+        assert!(!c.link.read_paused);
+        assert!(c.link.read_resumed);
+        c.teardown(cx);
+        assert_eq!(c.link.queued_out, 0);
+        assert_eq!(c.link.live_streams, 0);
+    }
+
+    #[test]
+    fn refill_credit_never_exceeds_the_advertised_window() {
+        let mut worker = worker();
+        let cx = &mut worker.cx;
+        let (token, _client) = connection(cx);
+        let Some(Entry::Conn(mut c)) = cx.slab.take(token) else {
+            panic!("missing connection")
+        };
+        c.link.live_streams = 1;
+        c.link.packet_average = 65_536;
+        assert_eq!(c.link.refill_window(cx), 128);
+        c.link.live_streams = 4;
+        assert_eq!(c.link.refill_window(cx), 32);
+        c.link.live_streams = 1000;
+        assert_eq!(c.link.refill_window(cx), 4);
+        c.link.live_streams = 0;
+        c.teardown(cx);
     }
 
     #[test]

@@ -97,6 +97,11 @@ pub(crate) struct Link {
     pub paused: bool,
     pub pause_changed: bool,
     pub throttled: bool,
+    pub read_paused: bool,
+    pub read_resumed: bool,
+    pub queued_out: usize,
+    pub live_streams: usize,
+    pub packet_average: usize,
     pub closing: bool,
     pub violations: u32,
     /// Holds one of the server-wide connection slots.
@@ -147,7 +152,7 @@ impl Link {
     }
 
     pub(crate) fn want(&self) -> EventFlags {
-        let mut f = if self.throttled {
+        let mut f = if self.throttled || self.read_paused {
             EventFlags::RDHUP
         } else {
             sys::IN
@@ -156,6 +161,30 @@ impl Link {
             f |= sys::OUT;
         }
         f
+    }
+
+    pub(crate) fn refill_window(&self, cx: &Ctx) -> u32 {
+        let packets = cx.cfg().ws_write_high_water as usize
+            / self.live_streams.max(1)
+            / self.packet_average.max(1);
+        packets.clamp(4.min(cx.sh.window) as usize, cx.sh.window as usize) as u32
+    }
+
+    pub(crate) fn queue_add(&mut self, cx: &Ctx, n: usize) {
+        self.queued_out += n;
+        if self.queued_out > cx.cfg().conn_queue_max as usize && !self.read_paused {
+            self.read_paused = true;
+            self.sync_interest(cx);
+        }
+    }
+
+    pub(crate) fn queue_sub(&mut self, cx: &Ctx, n: usize) {
+        self.queued_out = self.queued_out.saturating_sub(n);
+        if self.read_paused && self.queued_out < cx.cfg().conn_queue_max as usize / 2 {
+            self.read_paused = false;
+            self.read_resumed = true;
+            self.sync_interest(cx);
+        }
     }
 
     pub(crate) fn sync_interest(&mut self, cx: &Ctx) {

@@ -191,6 +191,29 @@ pub fn recv(fd: impl AsFd, buf: &mut [u8]) -> Res<usize> {
     Ok(n)
 }
 
+pub(crate) fn client_recv_buffer(cfg: &rustwisp_config::Config) -> usize {
+    let cap = std::fs::read_to_string("/proc/sys/net/core/rmem_max")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    fixed_client_buffer(cfg.socket_buffer_size, cfg.client_recv_buffer, cap)
+}
+
+fn fixed_client_buffer(explicit: u32, requested: u32, cap: usize) -> usize {
+    let want = (requested as usize).min(cap).min(i32::MAX as usize / 2);
+    if explicit != 0 || want < 2 * 1024 * 1024 {
+        0
+    } else {
+        want
+    }
+}
+
+pub(crate) fn set_client_recv_buffer(fd: &OwnedFd, size: usize) {
+    if size != 0 {
+        let _ = sockopt::set_socket_recv_buffer_size(fd, size);
+    }
+}
+
 /// Look at the next bytes without taking them off the socket.
 pub fn peek(fd: impl AsFd, buf: &mut [u8]) -> Res<usize> {
     let (n, _) = rustix::net::recv(fd, buf, RecvFlags::PEEK)?;
@@ -373,6 +396,15 @@ pub(crate) fn terminal_resize(fd: &OwnedFd, rows: u16, cols: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_buffer_preserves_autotuning_below_the_floor() {
+        assert_eq!(fixed_client_buffer(0, 8 << 20, 212_992), 0);
+        assert_eq!(fixed_client_buffer(0, 8 << 20, 2 << 20), 2 << 20);
+        assert_eq!(fixed_client_buffer(4096, 8 << 20, 4 << 20), 0);
+        assert_eq!(fixed_client_buffer(0, 0, 4 << 20), 0);
+        assert_eq!(fixed_client_buffer(0, 8 << 20, 0), 0);
+    }
 
     #[test]
     fn ephemeral_listeners_do_not_join_an_existing_port_group() {

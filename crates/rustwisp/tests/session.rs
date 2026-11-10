@@ -201,7 +201,7 @@ fn v1_handshake_sends_continue_for_stream_zero() {
     assert_eq!((p.ptype, p.sid), (ptype::CONTINUE, 0));
     let window = u32::from_le_bytes(p.payload[..4].try_into().unwrap());
     assert_eq!(
-        window, 8,
+        window, 128,
         "default 1 MiB packets cap the window by stream-queue-max"
     );
     h.stop_and_join();

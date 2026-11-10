@@ -109,6 +109,7 @@ fn start_c(bin: &str) -> CServer {
             "--connections-limit-per-ip=0",
             "--connection-window-s=0",
             "--log-level=error",
+            "--buffer-remaining=4",
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -226,7 +227,9 @@ fn the_rust_server_says_what_the_c_server_says() {
     let c = start_c(&bin);
     let from_c = transcript(c.port, echo, udp, dead);
 
-    let h = start(test_config());
+    let mut cfg = test_config();
+    cfg.buffer_remaining = 4;
+    let h = start(cfg);
     let from_rust = transcript(h.port(), echo, udp, dead);
     h.stop_and_join();
 

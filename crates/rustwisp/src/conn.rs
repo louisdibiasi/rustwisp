@@ -74,6 +74,7 @@ impl Conn {
         }
         let c = cx.cfg();
         sys::tune_tcp(&fd, c.tcp_nodelay, c.tcp_quickack, c.socket_buffer_size);
+        sys::set_client_recv_buffer(&fd, cx.sh.client_rcvbuf);
         let peer = peer.unwrap_or_else(|| SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0));
         crate::log::debug(
             "conn",
@@ -106,6 +107,11 @@ impl Conn {
                 paused: false,
                 pause_changed: false,
                 throttled: false,
+                read_paused: false,
+                read_resumed: false,
+                queued_out: 0,
+                live_streams: 0,
+                packet_average: 64 * 1024,
                 closing: false,
                 violations: 0,
                 conn_slot,
@@ -168,6 +174,13 @@ impl Conn {
         if self.link.closing {
             return;
         }
+        if self.link.read_resumed && !self.link.throttled && !self.link.read_paused {
+            self.link.read_resumed = false;
+            let mut data = std::mem::take(&mut self.link.rbuf);
+            let used = self.process_frames(cx, &mut data);
+            data.drain(..used);
+            self.link.rbuf = data;
+        }
         if self.link.pending_throttle_ms > 0 {
             let wait = std::mem::take(&mut self.link.pending_throttle_ms);
             crate::log::debug(
@@ -201,7 +214,7 @@ impl Conn {
     // -------------------------------------------------------------------------------- events
 
     pub(crate) fn on_event(&mut self, cx: &mut Ctx, flags: EventFlags) {
-        if self.link.throttled
+        if (self.link.throttled || self.link.read_paused)
             && flags.intersects(EventFlags::RDHUP | EventFlags::HUP | EventFlags::ERR)
         {
             self.link.close();
@@ -213,7 +226,10 @@ impl Conn {
         if self.link.closing {
             return;
         }
-        if flags.intersects(sys::IN | EventFlags::HUP | EventFlags::ERR) && !self.link.throttled {
+        if flags.intersects(sys::IN | EventFlags::HUP | EventFlags::ERR)
+            && !self.link.throttled
+            && !self.link.read_paused
+        {
             self.on_readable(cx);
         }
     }
@@ -271,7 +287,11 @@ impl Conn {
         if self.link.state == State::HttpReply {
             return; // whatever else the client sends is ignored
         }
-        while !self.link.closing && !self.link.throttled && total < MAX_READ_PER_EVENT {
+        while !self.link.closing
+            && !self.link.throttled
+            && !self.link.read_paused
+            && total < MAX_READ_PER_EVENT
+        {
             let mut rx = std::mem::take(&mut cx.rx);
             let (n, drained) = if self.link.state == State::Http || self.link.need > rx.len() {
                 self.read_into_carry(cx, &mut rx)
@@ -741,6 +761,7 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
                     return; // raced with our CLOSE
                 };
                 Stats::add(&cx.sh.stats.bytes_in, p.payload.len() as u64);
+                self.link.packet_average = (self.link.packet_average * 7 + p.payload.len()) / 8;
                 self.link.charge_bandwidth(cx, p.payload.len());
                 stream::on_data(&mut self.link, cx, s, p.payload);
                 if s.state == SState::Closed {
@@ -788,7 +809,7 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
         let max = u64::from(cx.cfg().max_message_size);
         self.link.need = 0;
         let mut pos = 0;
-        while !self.link.closing {
+        while !self.link.closing && !self.link.read_paused {
             let rest = &mut data[pos..];
             let h = match ws::parse_header(rest) {
                 Ok(h) => h,

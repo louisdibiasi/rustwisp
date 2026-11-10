@@ -125,9 +125,10 @@ pub(crate) fn parse_literal(host: &str) -> Result<Option<IpAddr>, ()> {
 
 // ------------------------------------------------------------------------------------- lifecycle
 
-fn new_stream(cx: &mut Ctx, conn_tok: u64, id: u32, udp: bool, host: &str, port: u16) -> Stream {
+fn new_stream(cx: &mut Ctx, link: &mut Link, id: u32, udp: bool, host: &str, port: u16) -> Stream {
+    link.live_streams += 1;
     let token = cx.slab.insert(Entry::Stream {
-        conn: conn_tok,
+        conn: link.reg.token,
         sid: id,
     });
     Stats::inc(&cx.sh.stats.streams_total);
@@ -173,6 +174,8 @@ pub(crate) fn close_stream(link: &mut Link, cx: &mut Ctx, s: &mut Stream, reason
     s.reg.forget();
     cx.slab.release(s.reg.token);
     Stats::dec(&cx.sh.stats.streams_active);
+    link.live_streams -= 1;
+    link.queue_sub(cx, s.out.len());
     s.out.clear();
     s.hs = None;
     if send {
@@ -315,7 +318,7 @@ pub(crate) fn open(conn: &mut Conn, cx: &mut Ctx, id: u32, kind: u8, host: &str,
         link.send_close(cx, id, close::BLOCKED);
         return;
     }
-    let mut s = new_stream(cx, link.reg.token, id, kind == stream_type::UDP, host, port);
+    let mut s = new_stream(cx, link, id, kind == stream_type::UDP, host, port);
     match parse_literal(host) {
         Err(()) => close_stream(link, cx, &mut s, close::INVALID_INFO, true),
         Ok(Some(ip)) => open_literal(link, cx, &mut s, ip),
@@ -354,7 +357,7 @@ pub(crate) fn open_terminal(conn: &mut Conn, cx: &mut Ctx, id: u32, command: &st
             return;
         }
     };
-    let mut s = new_stream(cx, conn.link.reg.token, id, false, "", 0);
+    let mut s = new_stream(cx, &mut conn.link, id, false, "", 0);
     s.terminal = Some(terminal);
     s.fd = Some(master);
     connected(&mut conn.link, cx, &mut s);
@@ -784,7 +787,11 @@ fn flush_out(link: &mut Link, cx: &mut Ctx, s: &mut Stream) -> bool {
         };
         let sent = send_remote(s, &s.out.as_slice()[prefix..prefix + chunk]);
         match sent {
-            Ok(n) => s.out.consume(if s.udp { prefix + chunk } else { n }),
+            Ok(n) => {
+                let took = if s.udp { prefix + chunk } else { n };
+                s.out.consume(took);
+                link.queue_sub(cx, took);
+            }
             Err(Errno::INTR) => {}
             Err(e) if sys::is_would_block(e) => {
                 update_events(cx, s);
@@ -832,7 +839,8 @@ pub(crate) fn on_data(link: &mut Link, cx: &mut Ctx, s: &mut Stream, data: &[u8]
         queued = !data.is_empty();
     }
     if queued && (s.udp || !data.is_empty()) {
-        if s.out.len() + data.len() + 4 > cx.cfg().stream_queue_max as usize {
+        let queued_len = data.len() + if s.udp { 4 } else { 0 };
+        if s.out.len() + queued_len > cx.cfg().stream_queue_max as usize {
             crate::log::debug(
                 "stream",
                 format_args!("{}: stream {} queue limit", link.ip, s.id),
@@ -844,6 +852,7 @@ pub(crate) fn on_data(link: &mut Link, cx: &mut Ctx, s: &mut Stream, data: &[u8]
             s.out.push(&(data.len() as u32).to_le_bytes());
         }
         s.out.push(data);
+        link.queue_add(cx, queued_len);
         if s.state == SState::Open {
             update_events(cx, s);
         }
@@ -852,7 +861,7 @@ pub(crate) fn on_data(link: &mut Link, cx: &mut Ctx, s: &mut Stream, data: &[u8]
     if !s.udp {
         s.remaining = s.remaining.saturating_sub(1);
         if s.remaining == 0 {
-            s.remaining = cx.sh.window;
+            s.remaining = link.refill_window(cx);
             if s.out.is_empty() {
                 link.send_continue(cx, s.id, s.remaining);
             } else {
