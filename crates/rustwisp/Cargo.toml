@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [features]
 default = []
+worker-panic-test = []
 twisp = ["rustix/pty", "rustix/process", "rustix/termios"]
 
 [dependencies]

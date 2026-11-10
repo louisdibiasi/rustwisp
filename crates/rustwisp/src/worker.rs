@@ -213,6 +213,10 @@ impl Worker {
     }
 
     pub(crate) fn run(mut self) {
+        #[cfg(feature = "worker-panic-test")]
+        if self.cx.index == 0 && std::env::var_os("RUSTWISP_TEST_WORKER_PANIC").is_some() {
+            panic!("worker panic fixture");
+        }
         let mut scratch: Vec<Event> = Vec::with_capacity(MAX_EVENTS);
         let mut events: Vec<(u64, EventFlags)> = Vec::with_capacity(MAX_EVENTS);
         while !self.cx.sh.stop.load(Ordering::Acquire) {

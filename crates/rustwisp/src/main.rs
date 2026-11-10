@@ -2,9 +2,34 @@
 
 #[cfg(target_os = "linux")]
 fn main() {
+    install_panic_hook();
     let code = run();
     rustwisp::log::flush();
     std::process::exit(code);
+}
+
+#[cfg(target_os = "linux")]
+fn install_panic_hook() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static PANICKING: AtomicBool = AtomicBool::new(false);
+    std::panic::set_hook(Box::new(|info| {
+        if PANICKING.swap(true, Ordering::SeqCst) {
+            std::process::abort();
+        }
+        rustwisp::log::set_level(rustwisp_config::LogLevel::Error);
+        let thread = std::thread::current();
+        rustwisp::log::error(
+            "panic",
+            format_args!(
+                "thread {} panicked at {}; terminating",
+                thread.name().unwrap_or("unnamed"),
+                info.location()
+                    .map_or_else(|| "unknown".to_string(), |at| at.to_string())
+            ),
+        );
+        rustwisp::log::flush();
+        std::process::abort();
+    }));
 }
 
 #[cfg(target_os = "linux")]
