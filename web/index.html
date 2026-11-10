@@ -12,13 +12,12 @@
 		<style>
 			:root {
 				color-scheme: dark;
-				--bg: #120c09;
-				--bg-glow: #2a150b;
-				--surface: #1c130e;
-				--sunken: #0d0806;
+				--bg: #16100c;
+				--surface: #1f1611;
+				--sunken: #120c09;
 				--ink: #f2e6da;
 				--muted: #b69f8d;
-				--line: #3a2a1f;
+				--line: #382a20;
 				--accent: #e8893f;
 				--accent-hi: #ff9f58;
 				--accent-ink: #2a1205;
@@ -35,12 +34,12 @@
 			body {
 				margin: 0;
 				min-height: 100vh;
-				background: radial-gradient(1200px 600px at 78% -10%, var(--bg-glow), transparent 70%), var(--bg);
-				background-attachment: fixed;
+				background: var(--bg);
 				color: var(--ink);
 				font: 15px/1.5 var(--sans);
 			}
 			main {
+				isolation: isolate;
 				max-width: 1440px;
 				margin: 0 auto;
 				padding: 32px clamp(16px, 4vw, 56px) 64px;
@@ -51,7 +50,7 @@
 				justify-content: space-between;
 				gap: var(--gap);
 				margin-bottom: 8px;
-				animation: rise 0.5s ease both;
+				animation: rise 0.22s ease-out both;
 			}
 			h1 {
 				margin: 0;
@@ -62,7 +61,7 @@
 			h1 span {
 				color: var(--accent);
 				font-style: italic;
-				transition: color 0.2s ease;
+				transition: color 150ms ease-out;
 			}
 			h1:hover span {
 				color: var(--accent-hi);
@@ -83,23 +82,14 @@
 				}
 			}
 			h2 {
-				display: flex;
-				align-items: center;
-				gap: 12px;
-				margin: 28px 0 10px;
-				font-size: 12.5px;
+				margin: 32px 0 10px;
+				font-size: 13px;
 				font-weight: 800;
 				font-style: italic;
-				letter-spacing: 0.14em;
+				letter-spacing: 0.12em;
 				text-transform: uppercase;
 				color: var(--accent);
-				animation: rise 0.5s ease both;
-			}
-			h2::after {
-				content: '';
-				flex: 1;
-				height: 1px;
-				background: linear-gradient(90deg, var(--line), transparent);
+				animation: rise 0.22s ease-out both;
 			}
 			.card {
 				background: var(--surface);
@@ -108,13 +98,11 @@
 				padding: 20px;
 				display: grid;
 				gap: 14px;
-				box-shadow: 0 12px 32px -20px rgba(0, 0, 0, 0.7);
-				transition: border-color 0.2s ease, box-shadow 0.25s ease;
-				animation: rise 0.55s 0.05s ease both;
+				transition: border-color 150ms ease-out;
+				animation: rise 0.22s ease-out both;
 			}
 			.card:hover {
-				border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
-				box-shadow: 0 14px 36px -18px color-mix(in srgb, var(--accent) 35%, black);
+				border-color: #5a3f2c;
 			}
 			.pair {
 				display: grid;
@@ -144,21 +132,21 @@
 				border: 1px solid var(--line);
 				border-radius: 9px;
 				padding: 10px 12px;
-				transition: border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+				transition: border-color 150ms ease-out;
 			}
 			input[type='text']:hover,
 			input[type='password']:hover,
 			select:hover,
 			textarea:hover {
-				border-color: color-mix(in srgb, var(--accent) 60%, var(--line));
+				border-color: #5a3f2c;
 			}
 			input[type='text']:focus,
 			input[type='password']:focus,
 			select:focus,
 			textarea:focus {
 				border-color: var(--accent);
-				box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent);
-				outline: none;
+				outline: 2px solid var(--accent);
+				outline-offset: 1px;
 			}
 			select {
 				font-family: var(--sans);
@@ -191,13 +179,12 @@
 				cursor: pointer;
 				color: var(--ink);
 				background: var(--sunken);
-				transition: transform 0.15s ease, box-shadow 0.2s ease, border-color 0.2s ease,
-					background 0.2s ease, opacity 0.15s ease;
+				transition: transform 150ms ease-out, border-color 150ms ease-out, background-color 150ms ease-out,
+					opacity 150ms ease-out;
 			}
 			button:hover:not(:disabled) {
-				transform: translateY(-2px);
+				transform: translateY(-1px);
 				border-color: var(--accent);
-				box-shadow: 0 8px 18px -10px color-mix(in srgb, var(--accent) 70%, black);
 			}
 			button.primary {
 				background: var(--accent);
@@ -210,7 +197,6 @@
 			}
 			button:active:not(:disabled) {
 				transform: translateY(0);
-				box-shadow: none;
 			}
 			button:disabled {
 				opacity: 0.45;
@@ -223,7 +209,7 @@
 				font: italic 12.5px var(--mono);
 				color: var(--muted);
 				padding: 6px 2px;
-				animation: rise 0.55s 0.1s ease both;
+				animation: rise 0.22s ease-out both;
 			}
 			.status b {
 				color: var(--ink);
@@ -240,14 +226,12 @@
 			}
 			.dot.on {
 				background: var(--ok);
-				animation: pulse 2s ease-out infinite;
 			}
 			.dot.bad {
 				background: var(--bad);
 			}
 			.dot.busy {
 				background: var(--warn);
-				animation: pulse 1s ease-out infinite;
 			}
 			textarea {
 				min-height: 190px;
@@ -280,13 +264,13 @@
 				font-size: 12.5px;
 				font-style: italic;
 				color: var(--muted);
-				animation: rise 0.6s 0.2s ease both;
+				animation: rise 0.22s ease-out both;
 			}
 			a {
 				color: var(--accent);
 				text-decoration-color: transparent;
 				text-underline-offset: 3px;
-				transition: color 0.15s ease, text-decoration-color 0.15s ease;
+				transition: color 150ms ease-out, text-decoration-color 150ms ease-out;
 			}
 			a:hover {
 				color: var(--accent-hi);
@@ -295,20 +279,11 @@
 			@keyframes rise {
 				from {
 					opacity: 0;
-					transform: translateY(8px);
+					transform: translateY(6px);
 				}
 				to {
 					opacity: 1;
 					transform: none;
-				}
-			}
-			@keyframes pulse {
-				0% {
-					box-shadow: 0 0 0 0 rgba(143, 209, 138, 0.55);
-				}
-				70%,
-				100% {
-					box-shadow: 0 0 0 7px rgba(143, 209, 138, 0);
 				}
 			}
 			@media (prefers-reduced-motion: reduce) {
