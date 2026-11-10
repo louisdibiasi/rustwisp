@@ -108,6 +108,7 @@ use std::time::{Duration, Instant};
 use common::*;
 use rustwisp_config::{Config, FloodConfig};
 use rustwisp_proto::wisp::{close, ptype};
+use rustwisp_proto::ws;
 
 fn flood(f: impl FnOnce(&mut FloodConfig)) -> FloodConfig {
     let mut fc = FloodConfig {
@@ -262,9 +263,16 @@ fn repeated_violations_close_the_websocket() {
     };
     let h = start(cfg);
     let mut c = Client::v1(h.port());
-    for sid in 1..=6 {
+    c.tcp(1, echo);
+    c.send_packet(ptype::DATA, 1, b"ready");
+    assert_eq!(c.read_data(1, 5), b"ready");
+    for sid in 2..=3 {
         c.tcp(sid, echo);
+        c.expect_close(sid, close::THROTTLED);
     }
+    c.send_frame(ws::opcode::PING, true, b"below-limit");
+    assert_eq!(c.recv_frame(), (ws::opcode::PONG, b"below-limit".to_vec()));
+    c.tcp(4, echo);
     read_to_close(&mut c);
     h.stop_and_join();
 }
