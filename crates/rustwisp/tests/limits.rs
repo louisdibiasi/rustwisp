@@ -4,6 +4,52 @@
 mod common;
 
 #[test]
+fn capacity_rejections_finish_the_http_response_cleanly() {
+    let mut cfg = common::test_config();
+    cfg.flood = flood(|f| f.max_concurrent_connections = 1);
+    cfg.handshake_timeout_ms = 200;
+    let h = common::start(cfg);
+    let held = common::Client::v1(h.port());
+    for _ in 0..128 {
+        assert!(upgrade_status(h.port(), "").contains("503"));
+    }
+    let mut idle = std::net::TcpStream::connect(("127.0.0.1", h.port())).unwrap();
+    idle.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+        .unwrap();
+    assert_eq!(std::io::Read::read(&mut idle, &mut [0; 1024]).unwrap(), 0);
+    assert!(upgrade_status(h.port(), "").contains("503"));
+    drop(held);
+    h.stop_and_join();
+}
+
+#[test]
+fn a_disconnected_throttled_client_releases_its_connection_slot() {
+    let cfg = rustwisp_config::Config {
+        bandwidth_limit_kbps: 8,
+        flood: flood(|f| f.max_concurrent_connections = 1),
+        ..common::test_config()
+    };
+    let h = common::start(cfg);
+    let mut client = common::Client::v1(h.port());
+    client.tcp(1, common::echo_server());
+    client.send_packet(rustwisp_proto::wisp::ptype::DATA, 1, &[7; 10_000]);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    drop(client);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
+    loop {
+        if upgrade_status(h.port(), "").contains("101") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a closed client retained its slot while throttled"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    h.stop_and_join();
+}
+
+#[test]
 fn duplicate_and_truncated_proxy_headers_cannot_rotate_the_limited_address() {
     for truncated in [false, true] {
         let cfg = rustwisp_config::Config {
@@ -338,23 +384,4 @@ fn reputation_survives_a_restart() {
     );
     h.stop_and_join();
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn capacity_rejections_finish_the_http_response_cleanly() {
-    let mut cfg = common::test_config();
-    cfg.flood = flood(|f| f.max_concurrent_connections = 1);
-    cfg.handshake_timeout_ms = 200;
-    let h = common::start(cfg);
-    let held = common::Client::v1(h.port());
-    for _ in 0..128 {
-        assert!(upgrade_status(h.port(), "").contains("503"));
-    }
-    let mut idle = std::net::TcpStream::connect(("127.0.0.1", h.port())).unwrap();
-    idle.set_read_timeout(Some(std::time::Duration::from_secs(1)))
-        .unwrap();
-    assert_eq!(std::io::Read::read(&mut idle, &mut [0; 1024]).unwrap(), 0);
-    assert!(upgrade_status(h.port(), "").contains("503"));
-    drop(held);
-    h.stop_and_join();
 }

@@ -147,10 +147,11 @@ impl Link {
     }
 
     pub(crate) fn want(&self) -> EventFlags {
-        let mut f = EventFlags::empty();
-        if !self.throttled {
-            f |= sys::IN;
-        }
+        let mut f = if self.throttled {
+            EventFlags::RDHUP
+        } else {
+            sys::IN
+        };
         if !self.wbuf.is_empty() {
             f |= sys::OUT;
         }

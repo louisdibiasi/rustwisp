@@ -194,6 +194,12 @@ impl Conn {
     // -------------------------------------------------------------------------------- events
 
     pub(crate) fn on_event(&mut self, cx: &mut Ctx, flags: EventFlags) {
+        if self.link.throttled
+            && flags.intersects(EventFlags::RDHUP | EventFlags::HUP | EventFlags::ERR)
+        {
+            self.link.close();
+            return;
+        }
         if flags.contains(sys::OUT) {
             self.link.flush(cx);
         }
