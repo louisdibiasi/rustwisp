@@ -66,7 +66,7 @@ Take these as rough numbers. Loopback inside WSL is not a real network, runs dif
 
 ## Compatibility
 
-The wire format follows the [Wisp protocol](https://github.com/MercuryWorkshop/wisp-protocol). The v2 password extension is read in both the layout the specification gives and the one the C server uses. A test replays the same scripted sessions against the C server and this one and checks that the transcripts match.
+The wire format follows the [Wisp protocol](https://github.com/MercuryWorkshop/wisp-protocol). The v2 password extension is read in both the layout the specification gives and the one the C server uses. A test replays the same scripted sessions against the C server and this one and checks that the transcripts match. It is stricter than the C server in a few places: an upgrade request with malformed headers gets a 400 where the C server answers 101, and an invalid WebSocket close code gets 1002 where the C server echoes it.
 
 ## Building and testing
 

@@ -111,7 +111,7 @@ password-user = alice:$2b$12$...your hash...
 
 yescrypt (`$y$`) and MD5 (`$1$`) are not supported, and the server refuses to start with one in the config, naming the user, so nobody gets locked out by surprise.
 
-Checking a hash is slow on purpose, so it runs on two helper threads and not on the connection's own thread. A bounded queue sits in front of them: if more than 64 checks are waiting, new logins are refused until it drains. A name that does not exist costs the same time as a wrong password, so response time does not reveal who has an account.
+Checking a hash is slow on purpose, so it runs on two helper threads and not on the connection's own thread. A bounded queue sits in front of them: if more than 64 checks are waiting, new logins are refused until it drains. When every account uses the same kind of hash, a name that does not exist costs about the same as a wrong password, so response time does not say who has an account. With a mix of plain text, bcrypt and SHA hashes the times differ by kind, and a patient observer could tell some account types apart. If that matters, use one hash type for every account.
 
 ## Sending traffic through another proxy
 
@@ -125,7 +125,7 @@ proxy = socks5://127.0.0.1:1080
 
 Every outbound TCP stream then goes to the proxy, which makes the last hop. The destination name is resolved and checked against your rules here first, and the proxy is told to connect to the address that passed. It never sees the name, so it cannot be pointed somewhere your rules forbid by a name that resolves differently on its side.
 
-Some setups want the proxy to see the name, for example to route by domain. Set `proxy-send-hostnames = on` for that. The proxy then resolves the name itself, and your address checks no longer bind it, so only do this if the proxy enforces its own egress rules.
+Some setups want the proxy to see the name, for example to route by domain. Set `proxy-send-hostnames = on` for that. The proxy then resolves the name itself, and your address checks no longer bind it, so only do this if the proxy enforces its own egress rules. A name that looks public from here can still be sent by the proxy to a loopback or LAN address.
 
 UDP cannot go through these proxies. By default UDP streams are refused. `proxy-udp = direct` sends them straight out instead, bypassing the proxy, which may not be what you want if the proxy is there to hide the server's address.
 
@@ -142,21 +142,21 @@ dns-server = [2606:4700:4700::1111]:53
 
 The port is optional and defaults to 53. The servers are asked in the order you list them. Each one gets `dns-timeout-ms` (3000 by default) to answer a question; if it stays silent, sends garbage or answers with an error, the next one is tried. If both questions come back as "no such name", that is the answer and no other server is asked. The server asks for both the A and AAAA records over plain UDP and orders the result by `dns-order`. An answer that came back truncated counts as a failure, since there is no TCP fallback.
 
-Answers are cached for their own TTL, bounded by `dns-ttl-s`, and failures for `dns-negative-ttl-s`; set either to 0 to turn that cache off. The egress rules (see [What clients are allowed to reach](#what-clients-are-allowed-to-reach)) are applied to the addresses that come back, and the connection goes to the address that passed.
+Answers are cached for their own TTL, bounded by `dns-ttl-s`, and failures for `dns-negative-ttl-s`; set either to 0 to turn that cache off. The egress rules (see [What clients are allowed to reach](#what-clients-are-allowed-to-reach)) are applied to the addresses that come back, and the connection goes to the address that passed. An answer with a TTL of 0 is cached for `dns-ttl-s`. The cache holds at most 4096 names, and when 256 lookups are already waiting, new ones are refused.
 
 Replies are accepted only from the server that was asked, on a fresh socket with a random source port and a random ID, and only when the question section matches. Nothing here makes plain DNS safe against someone who can see your traffic, so point it at a resolver on a network you trust.
 
 ## Logging
 
-The server writes one line per event to stderr, which systemd sends to the journal:
+The server writes one line per event to stderr, which systemd sends to the journal. Logging is best effort: lines go through a bounded queue to a separate writer, so a stuck stderr cannot stall a connection. If the queue fills up, lines are dropped, and on exit the server waits at most 100 ms for what is still queued.
 
 ```
 2026-11-08T12:00:00.123Z [info] server: listening on 0.0.0.0:6001 with 4 workers
 ```
 
-`log-level` picks what is written: `debug`, `info` (the default), `warn`, `error` or `none`. `info` covers startup, shutdown and the events worth noticing; `debug` adds a line for each connection accepted and closed, which is a lot on a busy server. Control characters in anything that came from a client are escaped, and passwords, login names and request headers are never logged.
+`log-level` picks what is written: `debug`, `info` (the default), `warn`, `error` or `none`. `info` covers startup, shutdown and the events worth noticing; `debug` adds a line for each connection accepted and closed, which is a lot on a busy server. Control characters in anything that came from a client are replaced with spaces, and passwords and request headers are never logged. Login names are not logged in normal use; a config error about a password hash the server does not support does name the entry it found.
 
-`log-blocked-dials = on` adds an `info` line each time a client asks for a destination the egress rules refuse. It is off by default because a scanner can produce a lot of them.
+`log-blocked-dials = on` adds an `info` line each time an outbound connection the server tried to make fails. Destinations the egress rules refuse have their own `info` lines whether or not this is on. It is off by default because a scanner can produce a lot of failed dials.
 
 ## Terminal streams (Twisp)
 
@@ -165,7 +165,7 @@ Twisp lets a Wisp v2 client open a stream that is a terminal on the server inste
 This runs programs on your machine on behalf of whoever can log in, so it is off twice over:
 
 1. It is a build-time feature. Build with `cargo build --release --features twisp`. The release tarball does not include it, and a server built without it refuses every terminal stream.
-2. It needs `enable-twisp = on`, Wisp v2, and a client that has logged in with one of the `password-user` entries. Anything else gets close reason `0x48`, and the attempt counts against the client's reputation.
+2. It needs `enable-twisp = on`, Wisp v2, and a client that has logged in with one of the `password-user` entries. A terminal request from a client that has finished the opening exchange without meeting these is refused with close reason `0x48` and counts against its reputation. Anything sent before that exchange completes is ignored. No command is started in either case.
 
 What to know before you turn it on:
 
