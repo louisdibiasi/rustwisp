@@ -4,6 +4,76 @@
 mod common;
 
 #[test]
+fn hostname_forwarding_delegates_address_policy_to_the_proxy() {
+    use std::net::UdpSocket;
+    for forward_name in [false, true] {
+        let dns = UdpSocket::bind("127.0.0.1:0").unwrap();
+        dns.set_read_timeout(Some(TIMEOUT)).unwrap();
+        let endpoint = dns.local_addr().unwrap();
+        let resolver = thread::spawn(move || {
+            for _ in 0..2 {
+                let mut buf = [0; 512];
+                let (n, peer) = dns.recv_from(&mut buf).unwrap();
+                let mut reply = buf[..n].to_vec();
+                reply[2] = 0x81;
+                reply[3] = 0x80;
+                if buf[n - 3] == 1 {
+                    reply[7] = 1;
+                    reply.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 8, 8, 8, 8]);
+                }
+                dns.send_to(&reply, peer).unwrap();
+            }
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut cfg = via(&format!(
+            "http://127.0.0.1:{}",
+            listener.local_addr().unwrap().port()
+        ));
+        cfg.dns_servers = vec![endpoint.to_string()];
+        cfg.allow_loopback = false;
+        cfg.proxy_send_hostnames = forward_name;
+        let echo = echo_server();
+        let proxy = thread::spawn(move || {
+            let (mut client, _) = listener.accept().unwrap();
+            client.set_read_timeout(Some(TIMEOUT)).unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                client.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8(head).unwrap();
+            if forward_name {
+                assert!(head.starts_with(&format!("CONNECT some.test:{echo} ")));
+                let mut remote = TcpStream::connect(("127.0.0.1", echo)).unwrap();
+                remote.set_read_timeout(Some(TIMEOUT)).unwrap();
+                remote.write_all(b"proof").unwrap();
+                let mut proof = [0; 5];
+                remote.read_exact(&mut proof).unwrap();
+                client.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
+                client.write_all(&proof).unwrap();
+            } else {
+                assert!(head.starts_with(&format!("CONNECT 8.8.8.8:{echo} ")));
+                client
+                    .write_all(b"HTTP/1.1 502 Unreachable\r\n\r\n")
+                    .unwrap();
+            }
+        });
+        let h = start(cfg);
+        let mut c = Client::v1(h.port());
+        c.connect_stream(1, stream_type::TCP, "some.test", echo);
+        if forward_name {
+            assert_eq!(c.read_data(1, 5), b"proof");
+        } else {
+            c.expect_close(1, close::UNREACHABLE);
+        }
+        h.stop_and_join();
+        proxy.join().unwrap();
+        resolver.join().unwrap();
+    }
+}
+
+#[test]
 fn stale_proxy_timer_cannot_close_a_reused_stream_id() {
     use std::time::Duration;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

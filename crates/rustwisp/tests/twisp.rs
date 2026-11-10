@@ -95,6 +95,138 @@ fn authenticated_terminal_runs_command() {
 static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(feature = "twisp")]
+#[test]
+fn terminal_children_only_start_with_standard_descriptors() {
+    let _serial = SERIAL.lock().unwrap();
+    let h = start(config());
+    let mut c = login(h.port(), true);
+    c.connect_stream(1, stream_type::TERM,
+        "sh -c 'for f in /proc/self/fd/*; do if test -e \"$f\"; then printf \"%s\\n\" \"$f\"; fi; done'", 0);
+    let descriptors = String::from_utf8(output(&mut c, 1)).unwrap();
+    let mut descriptors: Vec<_> = descriptors.lines().map(str::trim).collect();
+    descriptors.sort_unstable();
+    assert_eq!(
+        descriptors,
+        ["/proc/self/fd/0", "/proc/self/fd/1", "/proc/self/fd/2"]
+    );
+    h.stop_and_join();
+}
+
+#[cfg(feature = "twisp")]
+#[test]
+fn early_terminal_requests_are_not_replayed_after_login() {
+    use std::io::Write;
+    let _serial = SERIAL.lock().unwrap();
+    let mut cfg = config();
+    cfg.users[0].secret = "$2a$05$CCCCCCCCCCCCCCCCCCCCC.E5YPO9kmyuRGyh0XouQYb4YMJKvyOeW".into();
+    let h = start(cfg);
+    for valid in [true, false] {
+        let mut c = Client::connect(h.port(), "p");
+        assert_eq!(c.recv_packet().ptype, ptype::INFO);
+        c.connect_stream(1, stream_type::TERM, "printf early", 0);
+        let password = if valid { "U*U" } else { "bad" };
+        let mut meta = vec![8, 3, 0];
+        meta.extend_from_slice(b"terminal");
+        meta.extend_from_slice(password.as_bytes());
+        let mut info = vec![wisp::MAJOR, wisp::MINOR, ext::PASSWORD];
+        info.extend_from_slice(&(meta.len() as u32).to_le_bytes());
+        info.extend_from_slice(&meta);
+        let mut packet = wisp::build_info(wisp::MAJOR, wisp::MINOR).to_vec();
+        packet.truncate(5);
+        packet.extend_from_slice(&info);
+        let mut wire = c.frame_bytes(rustwisp_proto::ws::opcode::BINARY, true, &packet);
+        let mut connect = [0; 128];
+        let n =
+            wisp::build_connect(&mut connect, 2, stream_type::TERM, 0, b"printf pending").unwrap();
+        wire.extend(c.frame_bytes(rustwisp_proto::ws::opcode::BINARY, true, &connect[..n]));
+        c.sock.write_all(&wire).unwrap();
+        let result = c.recv_packet();
+        if valid {
+            assert_eq!((result.ptype, result.sid), (ptype::CONTINUE, 0));
+            c.connect_stream(3, stream_type::TERM, "printf allowed", 0);
+            assert_eq!(output(&mut c, 3), b"allowed");
+        } else {
+            assert_eq!(
+                (result.ptype, result.sid, result.payload),
+                (ptype::CLOSE, 0, vec![close::AUTH_BAD_PASSWORD])
+            );
+            c.expect_eof();
+        }
+    }
+    h.stop_and_join();
+}
+
+#[cfg(feature = "twisp")]
+#[test]
+fn command_boundaries_and_resize_payloads_remain_bounded() {
+    let _serial = SERIAL.lock().unwrap();
+    let mut cfg = config();
+    cfg.max_streams_per_conn = 1;
+    let h = start(cfg);
+    let mut c = login(h.port(), true);
+    for (sid, len) in [(1, 4095), (2, 4096)] {
+        let mut command = "printf ok".to_string();
+        command.push_str(&" ".repeat(len - command.len()));
+        c.connect_stream(sid, stream_type::TERM, &command, 0);
+        assert_eq!(output(&mut c, sid), b"ok");
+    }
+    for (sid, command) in [
+        (3, "x".repeat(4097)),
+        (4, "printf a\0b".into()),
+        (5, "cat '".into()),
+        (6, "x ".repeat(65)),
+    ] {
+        c.connect_stream(sid, stream_type::TERM, &command, 0);
+        c.expect_close(sid, close::INVALID_INFO);
+    }
+    c.send_packet(ptype::CONNECT, 7, &[stream_type::TERM, 0, 0, 0xff]);
+    c.expect_close(7, close::INVALID_INFO);
+    c.connect_stream(8, stream_type::TERM, "sh -c 'read x; stty size'", 0);
+    for payload in [
+        &[][..],
+        &[0],
+        &[0, 0, 0],
+        &[0, 0, 0, 0],
+        &[255, 255, 255, 255],
+        &[37, 0, 91, 0, 0],
+    ] {
+        c.send_packet(wisp::TWISP_RESIZE, 8, payload);
+    }
+    c.connect_stream(9, stream_type::TERM, "printf over-cap", 0);
+    c.expect_close(9, close::THROTTLED);
+    c.send_packet(ptype::DATA, 8, b"go\n");
+    assert!(String::from_utf8_lossy(&output(&mut c, 8)).contains("37 91"));
+    h.stop_and_join();
+}
+
+#[cfg(feature = "twisp")]
+#[test]
+fn stubborn_and_detached_terminal_descriptors_are_cleaned_up() {
+    let _serial = SERIAL.lock().unwrap();
+    let h = start(config());
+    let mut c = login(h.port(), true);
+    c.connect_stream(
+        1,
+        stream_type::TERM,
+        "sh -c 'trap \"\" HUP; echo $$; exec sleep 5'",
+        0,
+    );
+    let child = pid(&mut c);
+    c.send_packet(ptype::CLOSE, 1, &[close::VOLUNTARY]);
+    wait_reaped(&[child]);
+    c.connect_stream(
+        2,
+        stream_type::TERM,
+        "sh -c 'echo $$; exec 0<&- 1>&- 2>&-; exec sleep 5'",
+        0,
+    );
+    let child = pid(&mut c);
+    c.expect_close(2, close::VOLUNTARY);
+    wait_reaped(&[child]);
+    h.stop_and_join();
+}
+
+#[cfg(feature = "twisp")]
 fn output(c: &mut Client, sid: u32) -> Vec<u8> {
     let mut bytes = Vec::new();
     loop {

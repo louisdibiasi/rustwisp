@@ -313,6 +313,55 @@ mod tests {
         msg.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 127, 0, 0, 1]);
         msg
     }
+
+    #[test]
+    fn record_bounds_types_and_ttl_extremes_are_checked() {
+        let base = response(123, 1);
+        for ttl in [0u32, 1, u32::MAX] {
+            let mut msg = base.clone();
+            let offset = msg.len() - 10;
+            msg[offset..offset + 4].copy_from_slice(&ttl.to_be_bytes());
+            assert_eq!(parse(&msg, 123, "SoMe.TeSt", 1).unwrap().ttl, ttl);
+        }
+        let mut oversized = base.clone();
+        oversized.resize(4097, 0);
+        assert!(parse(&oversized, 123, "some.test", 1).is_err());
+        let mut counts = base.clone();
+        counts[6..8].copy_from_slice(&u16::MAX.to_be_bytes());
+        assert!(parse(&counts, 123, "some.test", 1).is_err());
+        assert!(
+            parse(&response(123, 28), 123, "some.test", 28)
+                .unwrap()
+                .addrs
+                .is_empty()
+        );
+        let mut foreign_class = base.clone();
+        let offset = foreign_class.len() - 12;
+        foreign_class[offset..offset + 2].copy_from_slice(&2u16.to_be_bytes());
+        assert!(
+            parse(&foreign_class, 123, "some.test", 1)
+                .unwrap()
+                .addrs
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn cyclic_and_malformed_cname_data_are_refused() {
+        let mut msg = query("some.test", 1, 1).unwrap();
+        msg[2] = 0x81;
+        msg[7] = 2;
+        msg.extend_from_slice(&[0xc0, 12, 0, 5, 0, 1, 0, 0, 0, 1, 0, 12]);
+        msg.extend_from_slice(b"\x05alias\x04test\0");
+        msg.extend_from_slice(b"\x05alias\x04test\0");
+        msg.extend_from_slice(&[0, 5, 0, 1, 0, 0, 0, 1, 0, 2, 0xc0, 12]);
+        assert!(parse(&msg, 1, "some.test", 1).is_err());
+        let mut msg = query("some.test", 1, 1).unwrap();
+        msg[2] = 0x81;
+        msg[7] = 1;
+        msg.extend_from_slice(&[0xc0, 12, 0, 5, 0, 1, 0, 0, 0, 1, 0, 1, 0xc0]);
+        assert!(parse(&msg, 1, "some.test", 1).is_err());
+    }
     #[test]
     fn endpoint_and_hostname_validation() {
         for value in ["127.0.0.1", "127.0.0.1:5300", "::1", "[::1]:5300", "[::1]"] {
@@ -409,6 +458,16 @@ mod tests {
             let last = forged.len() - 1;
             forged[last] = 2;
             attacker.send_to(&forged, peer).unwrap();
+            UdpSocket::bind("127.0.0.2:0")
+                .unwrap()
+                .send_to(&forged, peer)
+                .unwrap();
+            let mut oversized = forged.clone();
+            oversized.resize(5000, 0);
+            socket.send_to(&oversized, peer).unwrap();
+            let mut wrong_question = forged;
+            wrong_question[13] = b'x';
+            socket.send_to(&wrong_question, peer).unwrap();
             socket.send_to(&wrong, peer).unwrap();
         });
         let found = query_one(endpoint, "some.test", 1, Duration::from_secs(2)).unwrap();

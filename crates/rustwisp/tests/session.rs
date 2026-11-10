@@ -4,6 +4,52 @@
 mod common;
 
 #[test]
+fn partial_http_bytes_do_not_extend_the_handshake_deadline() {
+    let mut cfg = common::test_config();
+    cfg.handshake_timeout_ms = 100;
+    let h = common::start(cfg);
+    let mut socket = std::net::TcpStream::connect(("127.0.0.1", h.port())).unwrap();
+    socket
+        .set_read_timeout(Some(std::time::Duration::from_millis(800)))
+        .unwrap();
+    for fragment in ["G", "E", "T ", "/ "] {
+        if std::io::Write::write_all(&mut socket, fragment.as_bytes()).is_err() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let result = std::io::Read::read(&mut socket, &mut [0; 1]);
+    assert!(
+        matches!(result, Ok(0))
+            || matches!(result, Err(ref e) if e.kind() == std::io::ErrorKind::ConnectionReset),
+        "{result:?}"
+    );
+    h.stop_and_join();
+}
+
+#[test]
+fn a_pipelined_upgrade_after_a_plain_request_is_not_processed() {
+    let h = common::start(common::test_config());
+    let mut socket = std::net::TcpStream::connect(("127.0.0.1", h.port())).unwrap();
+    socket.set_read_timeout(Some(common::TIMEOUT)).unwrap();
+    let mut request = "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n".to_string();
+    request.push_str(&rustwisp_proto::http::upgrade_request(
+        "localhost",
+        h.port(),
+        "/",
+        "dGhlIHNhbXBsZSBub25jZQ==",
+        "p",
+        "",
+    ));
+    std::io::Write::write_all(&mut socket, request.as_bytes()).unwrap();
+    let mut response = String::new();
+    std::io::Read::read_to_string(&mut socket, &mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"));
+    assert!(!response.contains("101 Switching"));
+    h.stop_and_join();
+}
+
+#[test]
 fn websocket_close_payloads_are_validated() {
     let h = common::start(common::test_config());
     for code in [0u16, 999, 1004, 1005, 1006, 1015, 1016, 2999, 5000, 65535] {

@@ -96,6 +96,41 @@ fn closing_the_log_reader_does_not_terminate_the_server() {
     probe.expect_close(1, rustwisp_proto::wisp::close::BLOCKED);
 }
 
+#[test]
+fn a_closed_standard_error_descriptor_does_not_stop_connections() {
+    let _serial = ONE_SERVER_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let server = Running(
+        Command::new("sh")
+            .args([
+                "-c",
+                "exec 2>&-; exec \"$@\"",
+                "sh",
+                env!("CARGO_BIN_EXE_rustwisp"),
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "0",
+                "--workers",
+                "1",
+                "--log-level",
+                "debug",
+            ])
+            .spawn()
+            .unwrap(),
+    );
+    let port = listening_port(&server.0);
+    let mut client = common::Client::v1(port);
+    client.connect_stream(1, 1, "127.0.0.1", 80);
+    client.expect_close(1, rustwisp_proto::wisp::close::BLOCKED);
+    client.send_frame(rustwisp_proto::ws::opcode::PING, true, b"alive");
+    assert_eq!(
+        client.recv_frame(),
+        (rustwisp_proto::ws::opcode::PONG, b"alive".to_vec())
+    );
+}
+
 /// A TCP port nothing listens on right now, used as a dial target that must be refused.
 fn closed_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -158,6 +193,8 @@ fn configured_levels_filter_real_connection_logs() {
                 level,
                 "--password-user",
                 "private-user:private-password",
+                "--allow-host",
+                "allowed.test",
             ])
             .stderr(Stdio::piped())
             .spawn()
@@ -166,7 +203,30 @@ fn configured_levels_filter_real_connection_logs() {
         let mut client = common::Client::v1(port);
         client.connect_stream(1, 1, "127.0.0.1", 80);
         let _ = client.recv_packet();
+        client.connect_stream(2, 1, "line\nbreak\r\t\u{1b}[31m.test", 80);
+        client.expect_close(2, rustwisp_proto::wisp::close::BLOCKED);
         drop(client);
+        let mut login = common::Client::connect(port, "p");
+        let _ = login.recv_packet();
+        let user = b"private-user";
+        let password = b"private-password";
+        let mut meta = vec![user.len() as u8];
+        meta.extend_from_slice(&(password.len() as u16).to_le_bytes());
+        meta.extend_from_slice(user);
+        meta.extend_from_slice(password);
+        let mut body = vec![
+            rustwisp_proto::wisp::MAJOR,
+            rustwisp_proto::wisp::MINOR,
+            rustwisp_proto::wisp::ext::PASSWORD,
+        ];
+        body.extend_from_slice(&(meta.len() as u32).to_le_bytes());
+        body.extend_from_slice(&meta);
+        login.send_packet(rustwisp_proto::wisp::ptype::INFO, 0, &body);
+        assert_eq!(
+            login.recv_packet().ptype,
+            rustwisp_proto::wisp::ptype::CONTINUE
+        );
+        drop(login);
         std::thread::scope(|scope| {
             for _ in 0..4 {
                 scope.spawn(|| {
@@ -203,6 +263,7 @@ fn configured_levels_filter_real_connection_logs() {
         }
         for line in logs.lines() {
             assert!(line.contains("Z ["), "{line}");
+            assert!(line.chars().all(|ch| !ch.is_control()), "{line:?}");
         }
     }
 }

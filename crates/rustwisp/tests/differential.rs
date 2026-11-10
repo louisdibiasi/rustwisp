@@ -6,6 +6,66 @@
 
 mod common;
 
+#[test]
+fn hardened_parser_cases_are_compared_with_the_reference() {
+    let Ok(bin) = std::env::var("HOLYWISP_C_BIN") else {
+        return;
+    };
+    let reference = start_c(&bin);
+    let h = common::start(common::test_config());
+    let base = rustwisp_proto::http::upgrade_request(
+        "127.0.0.1",
+        80,
+        "/",
+        "dGhlIHNhbXBsZSBub25jZQ==",
+        "p",
+        "",
+    );
+    for (name, request) in [
+        ("version suffix", base.replace("HTTP/1.1", "HTTP/1.1junk")),
+        ("folded header", base.replace("Host:", " Host:")),
+        ("control byte", base.replace("Host:", "Host: x\0")),
+        (
+            "invalid key",
+            base.replace("dGhlIHNhbXBsZSBub25jZQ==", "bad"),
+        ),
+        (
+            "duplicate key",
+            base.replace(
+                "Sec-WebSocket-Key:",
+                "Sec-WebSocket-Key: x\r\nSec-WebSocket-Key:",
+            ),
+        ),
+    ] {
+        let status = |port| {
+            let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            socket.set_read_timeout(Some(TIMEOUT)).unwrap();
+            socket.write_all(request.as_bytes()).unwrap();
+            let mut buf = [0; 1024];
+            let n = socket.read(&mut buf).unwrap();
+            String::from_utf8_lossy(&buf[..n])
+                .lines()
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        let from_c = status(reference.port);
+        let from_rust = status(h.port());
+        println!("{name}: C={from_c}; Rust={from_rust}");
+        assert!(from_c.starts_with("HTTP/1."));
+        assert!(from_rust.starts_with("HTTP/1.1 400"));
+    }
+    let mut c = Client::v1(reference.port);
+    c.send_frame(opcode::CLOSE, true, &0u16.to_be_bytes());
+    let from_c = c.recv_frame();
+    let mut c = Client::v1(h.port());
+    c.send_frame(opcode::CLOSE, true, &0u16.to_be_bytes());
+    let from_rust = c.recv_frame();
+    println!("invalid close: C={from_c:?}; Rust={from_rust:?}");
+    assert_eq!(from_rust, (opcode::CLOSE, 1002u16.to_be_bytes().to_vec()));
+    h.stop_and_join();
+}
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};

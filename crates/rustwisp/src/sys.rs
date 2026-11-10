@@ -375,6 +375,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ephemeral_listeners_do_not_join_an_existing_port_group() {
+        for _ in 0..4 {
+            let mut ports = std::collections::HashSet::new();
+            let mut listeners = Vec::new();
+            for _ in 0..512 {
+                let (fd, port) = listen_tcp("127.0.0.1", 0, 8).unwrap();
+                assert!(
+                    ports.insert(port),
+                    "an ephemeral listener reused a live port"
+                );
+                listeners.push(fd);
+            }
+        }
+    }
+
+    #[test]
     fn epoll_reports_a_ready_eventfd() {
         let ep = epoll_new().unwrap();
         let w = wake_fd().unwrap();

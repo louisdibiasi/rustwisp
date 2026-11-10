@@ -51,6 +51,26 @@ fn try_login(port: u16, who: &str, pass: &str) -> Packet {
 }
 
 #[test]
+fn failure_timing_samples_cover_mixed_password_schemes() {
+    let h = start(hashed_config());
+    for who in ["alice", "bob", "carol", "dave", "unknown"] {
+        let mut samples = Vec::new();
+        for _ in 0..12 {
+            let at = Instant::now();
+            let packet = try_login(h.port(), who, "wrong");
+            samples.push(at.elapsed().as_micros());
+            assert_eq!(
+                (packet.ptype, packet.payload),
+                (ptype::CLOSE, vec![close::AUTH_BAD_PASSWORD])
+            );
+        }
+        samples.sort_unstable();
+        println!("{who}: median_us={}", samples[samples.len() / 2]);
+    }
+    h.stop_and_join();
+}
+
+#[test]
 fn hashed_and_plain_users_can_log_in() {
     let h = start(hashed_config());
     for (who, pass) in [

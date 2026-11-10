@@ -4,6 +4,100 @@
 mod common;
 
 #[test]
+fn tcp_and_udp_reject_nonpublic_address_spellings() {
+    let mut cfg = common::test_config();
+    cfg.allow_loopback = false;
+    cfg.allow_private = false;
+    cfg.allow_link_local = false;
+    let h = common::start(cfg);
+    let mut client = common::Client::v1(h.port());
+    let blocked = [
+        "127.0.0.1",
+        "127.255.255.254",
+        "127.0.0.1.",
+        "0.0.0.0",
+        "10.0.0.1",
+        "172.16.0.1",
+        "172.31.255.254",
+        "192.168.0.1",
+        "169.254.169.254",
+        "100.64.0.1",
+        "100.127.255.254",
+        "224.0.0.1",
+        "239.255.255.254",
+        "240.0.0.1",
+        "255.255.255.255",
+        "::1",
+        "[0:0:0:0:0:0:0:1]",
+        "::",
+        "fc00::1",
+        "fdff::1",
+        "fe80::1",
+        "ff02::1",
+        "::ffff:127.0.0.1",
+        "::ffff:7f00:1",
+        "::127.0.0.1",
+        "::ffff:0:127.0.0.1",
+        "64:ff9b::7f00:1",
+        "64:ff9b::808:808",
+        "64:ff9b:1::1",
+        "2002:7f00:1::",
+        "2002:0808:0808::",
+        "2001:0:4136:e378::1",
+    ];
+    for kind in [1, 2] {
+        for (i, host) in blocked.iter().enumerate() {
+            let sid = kind as u32 * 100 + i as u32;
+            client.connect_stream(sid, kind, host, 80);
+            client.expect_close(sid, rustwisp_proto::wisp::close::BLOCKED);
+        }
+        for (i, host) in [
+            "127.1",
+            "2130706433",
+            "0177.0.0.1",
+            "0x7f000001",
+            "fe80::1%lo",
+            "[fe80::1%lo]",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let sid = kind as u32 * 100 + 50 + i as u32;
+            client.connect_stream(sid, kind, host, 80);
+            client.expect_close(sid, rustwisp_proto::wisp::close::INVALID_INFO);
+        }
+    }
+    h.stop_and_join();
+}
+
+#[test]
+fn churned_streams_and_connections_ignore_expired_work() {
+    let mut cfg = common::test_config();
+    cfg.workers = 1;
+    cfg.max_streams_per_conn = 1;
+    cfg.connect_timeout_ms = 40;
+    cfg.handshake_timeout_ms = 100;
+    let h = common::start(cfg);
+    let echo = common::echo_server();
+    for batch in 0..16u16 {
+        let mut client = common::Client::v1(h.port());
+        for offset in 0..16u16 {
+            let bytes = (batch * 16 + offset).to_le_bytes();
+            client.tcp(1, echo);
+            client.send_packet(rustwisp_proto::wisp::ptype::DATA, 1, &bytes);
+            assert_eq!(client.read_data(1, bytes.len()), bytes);
+            client.send_packet(rustwisp_proto::wisp::ptype::CLOSE, 1, &[2]);
+        }
+    }
+    let mut client = common::Client::v1(h.port());
+    client.tcp(1, echo);
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    client.send_packet(rustwisp_proto::wisp::ptype::DATA, 1, b"fresh");
+    assert_eq!(client.read_data(1, 5), b"fresh");
+    h.stop_and_join();
+}
+
+#[test]
 fn normalized_numeric_targets_cannot_bypass_the_direct_ip_switch() {
     let mut cfg = common::test_config();
     cfg.allow_direct_ip = false;
