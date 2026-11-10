@@ -246,7 +246,14 @@ impl Client {
         let mut got = Vec::with_capacity(n);
         while got.len() < n {
             let p = self.recv_non_continue();
-            assert_eq!(p.ptype, ptype::DATA, "expected DATA, got {}", p.ptype);
+            assert_eq!(
+                p.ptype,
+                ptype::DATA,
+                "expected DATA, got {} (stream {}, payload {:?})",
+                p.ptype,
+                p.sid,
+                p.payload
+            );
             assert_eq!(p.sid, sid);
             got.extend_from_slice(&p.payload);
         }
