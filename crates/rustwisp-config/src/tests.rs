@@ -336,3 +336,22 @@ fn long_strings_are_rejected() {
     let long = "x".repeat(MAX_STRING + 1);
     assert!(cfg_from(&format!("motd = {long}")).is_err());
 }
+
+#[test]
+fn shipped_configurations_match_the_queue_and_lifetime_defaults() {
+    for text in [
+        include_str!("../../../rustwisp.conf.example"),
+        include_str!("../../../deploy/rustwisp.conf"),
+        include_str!("../../../fuzz/seeds/config_text/example-conf"),
+    ] {
+        let c = cfg_from(text).unwrap();
+        assert_eq!(c.stream_queue_max, 128 * 1024 * 1024);
+        assert_eq!(c.conn_queue_max, 256 * 1024 * 1024);
+        assert_eq!(c.client_recv_buffer, 8 * 1024 * 1024);
+        assert_eq!(c.busy_poll_us, 0);
+        assert!(!c.stop_on_stdin_eof);
+        assert!(c.conn_queue_max >= c.stream_queue_max);
+        assert_eq!(c.max_message_size, 1_048_581);
+        assert_eq!(c.ws_write_high_water, 8 * 1024 * 1024);
+    }
+}
