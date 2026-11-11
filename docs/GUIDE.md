@@ -45,7 +45,7 @@ rustwisp --config /etc/rustwisp/rustwisp.conf
 rustwisp --help
 ```
 
-Press Ctrl-C or send SIGTERM to stop it. Open connections are dropped and the reputation store is saved on the way out.
+Press Ctrl-C or send SIGTERM to stop it. Open connections are dropped and the reputation store is saved on the way out. If a parent process starts the server and holds a pipe to its standard input, `stop-on-stdin-eof = on` makes the server stop when that pipe closes; it is off by default.
 
 The server listens on one port for everything. A plain HTTP request gets the built-in browser client (or a one-line text reply if you turn that off), and a WebSocket upgrade starts a Wisp session.
 
@@ -68,13 +68,28 @@ The file is plain `key = value` lines. A `#` starts a comment. Booleans accept `
 | `allow-port`, `block-port` | empty | Port allow and block lists. `6000-6100` is a range. |
 | `enable-v2` | on | Offer Wisp v2 to clients that ask for it. |
 | `motd` | empty | Message of the day, sent to v2 clients. |
-| `connections-limit-per-ip` | 200 | New WebSockets per IP per window. |
+| `connections-limit-per-ip` | 200 | New WebSockets per IP per window. Over the limit a client gets a 429 with `Retry-After` set to `connection-window-s`, in seconds. |
 | `log-level` | `info` | How much the server writes to stderr. See [Logging](#logging). |
 | `dns-server` | empty | Resolve names with your own DNS servers. See [DNS servers](#dns-servers). |
 | `enable-twisp` | off | Terminal streams. Needs a special build; see [Terminal streams](#terminal-streams-twisp). |
 | `serve-webclient` | on | Serve the browser client on `GET /`. |
+| `stream-queue-max` | 134217728 | Bytes one stream may have queued toward its remote (4096 to 2147483648). |
+| `conn-queue-max` | 268435456 | Bytes one client may have queued across all its streams (4096 to 2147483648, at least `stream-queue-max`). |
+| `client-recv-buffer` | 8388608 | Receive buffer asked for on client sockets (0 to 1073741824; 0 leaves it to the kernel). |
+| `busy-poll-us` | 0 | Microseconds a worker keeps polling after a busy loop pass before it sleeps (0 to 10000). |
 
 The server checks the config at startup and refuses to run if a value is out of range, with the file and line in the message. There is no reload: restart to apply changes.
+
+### Flow control and memory
+
+Each stream has a window of packets the client may have in flight. With the defaults the window is the full 128 packets, because a full window of maximum-size packets fits in `stream-queue-max`. When a stream's remote is slow, the server hands out new credit as the queue drains, and it shares the credit between a connection's streams. A client that keeps sending past its window, and fills a stream's queue, is closed with `0x49`.
+
+`conn-queue-max` is the limit for one client across all its streams. When it is crossed the server stops reading from that client until the remotes catch up, and closes nothing, so a client with many stalled streams costs bounded memory. The check runs per frame, so the total can pass the limit by at most the frame being read. A separate hard cap on what is queued toward the client itself stays in force.
+
+None of this is a limit on the whole process. Allocator overhead and kernel socket buffers come on top, so size the machine for the number of busy clients you expect times `conn-queue-max`, not for a single number.
+
+`client-recv-buffer` is only applied when `socket-buffer-size` is 0 and the kernel allows at least 4 MiB (`net.core.rmem_max` of 2097152 or more, since the kernel doubles the value). Otherwise the kernel's own tuning is left alone. `busy-poll-us` trades CPU for round-trip time; 50 is a reasonable first value if you want it.
+
 
 ## What clients are allowed to reach
 
@@ -300,7 +315,7 @@ When a stream ends, the server says why with one byte.
 | `0x44` | Destination refused the connection. |
 | `0x47` | Transfer timed out. |
 | `0x48` | Blocked by the server's rules. |
-| `0x49` | Too much data queued; slow down. |
+| `0x49` | Too much data queued for one stream; slow down. Crossing `conn-queue-max` alone only pauses reading, it does not close anything. |
 | `0x81` | The client broke the protocol. |
 | `0xc0`, `0xc1`, `0xc2` | Wrong password, bad signature, login required. |
 

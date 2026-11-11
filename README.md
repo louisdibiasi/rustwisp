@@ -39,23 +39,23 @@ The [guide](docs/GUIDE.md) covers configuration, deployment behind a reverse pro
 
 ## Speed
 
-The C server already uses epoll well, so switching language buys little by itself. Most of the speed-up comes from one change: on the way from the remote server back to the client, payload bytes go through `splice` instead of being copied in user space. The client's reads are also larger. Traffic in the other direction is still copied, because every byte has to be unmasked.
+The C server already uses epoll well, so switching language buys little by itself. Most of the speed-up comes from two changes. On the way from the remote server back to the client, payload bytes go through `splice` instead of being copied in user space. On the way in, several DATA frames for one stream leave in a single `sendmsg`, large frames are forwarded while they are still arriving, and the per-stream flow-control window is the full 128 packets by default.
 
-Measured with the `rustwisp-bench` tool in this repo (i7-13700KF, WSL2, loopback, median of three 5-second runs, the C server as the baseline):
+Measured with the `rustwisp-bench` tool in this repo (i7-13700KF, WSL2, loopback, median of five 5-second runs, the C server as the baseline):
 
 | Scenario | C | Rust | Rust vs C | Per CPU-second |
 | --- | --- | --- | --- | --- |
-| 1 stream, MiB/s | 1796 | 2080 | 1.16x | 1.42x |
-| 10 streams | 1981 | 2134 | 1.08x | 1.20x |
-| 10 streams, 1 MiB packets | 1922 | 3317 | 1.73x | 1.81x |
-| 8 connections x 4 streams | 6974 | 8041 | 1.15x | 1.36x |
-| 16 connections x 4 streams | 7479 | 8907 | 1.19x | 1.69x |
-| Round trip, 64 bytes (p50) | 50.8 us | 50.6 us | same | |
-| Stream churn, per second | 7981 | 8181 | same | |
+| 1 stream, MiB/s | 1749 | 2559 | 1.46x | 1.88x |
+| 10 streams | 1882 | 1931 | 1.03x | 1.14x |
+| 10 streams, 1 MiB packets | 1829 | 2953 | 1.61x | 1.68x |
+| 8 connections x 4 streams | 6385 | 7942 | 1.24x | 1.56x |
+| 16 connections x 4 streams | 6918 | 7920 | 1.14x | 1.44x |
+| Round trip, 64 bytes (p50) | 53.9 us | 54.6 us | same | |
+| Stream churn, per second | 7421 | 7573 | same | |
 
-"Per CPU-second" is megabytes moved for each second of CPU the server used, which matters more than the raw rate when the machine has other work to do.
+"Per CPU-second" is megabytes moved for each second of CPU the server used, which matters more than the raw rate when the machine has other work to do. The Rust server also holds more memory under load than the C one (about 13 MiB against 3 MiB with one busy stream, 106 MiB against 68 MiB with 16 connections), because it queues more per stream.
 
-Take these as rough numbers. Loopback inside WSL is not a real network, runs differ by about 8 percent either way, and I have not repeated them on bare metal yet. The tool's own load generator tops out around 2 GiB/s on a single connection, so the 10-stream row understates the difference: an earlier test with a different generator saw about 1.9x there. That other generator, the C project's own pump, gives 1.25x for one stream and 1.9x for ten, but only about 1.1x for ten streams with 1 MiB packets, the row where `rustwisp-bench` shows 1.7x. I have not found why the two disagree on that row, and it is the same before and after the latest changes, so do not quote it on its own. Run `rustwisp-bench` yourself to check on your hardware; the [guide](docs/GUIDE.md#benchmarking) shows how.
+Take these as rough numbers. Loopback inside WSL is not a real network, runs differ by about 8 percent either way, and I have not repeated them on bare metal yet. The load generator matters too. The C project's own pump, which sends from a separate process, gives larger ratios for one and for ten streams (about 1.7 to 1.8x in the last run), but only about 1.1x for ten streams with 1 MiB packets, where `rustwisp-bench` shows 1.6x. I traced that gap to how each generator drains and backs off, not to the server, and widening the flow-control window alone did not close it. Run `rustwisp-bench` yourself to check on your hardware; the [guide](docs/GUIDE.md#benchmarking) shows how.
 
 ## Limits
 
