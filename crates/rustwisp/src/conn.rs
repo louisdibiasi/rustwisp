@@ -22,7 +22,7 @@ use crate::reputation::{Event, Tier};
 use crate::stats::Stats;
 use crate::stream::{self, SState, Stream};
 use crate::sys::{self, Errno, EventFlags};
-use crate::worker::{Ctx, Entry, TimerKind};
+use crate::worker::{Ctx, Entry, RX_SIZE, TimerKind};
 
 /// Total bytes taken from one client in one readiness event before yielding to other connections.
 const MAX_READ_PER_EVENT: usize = 1024 * 1024;
@@ -60,6 +60,18 @@ pub(crate) struct Conn {
     pub streams: StreamMap,
     /// `pause_changed` already applied to the streams.
     applied_paused: bool,
+    upload: Option<Upload>,
+    read_chunk: usize,
+    read_limit: usize,
+}
+
+#[derive(Debug)]
+struct Upload {
+    sid: u32,
+    token: u64,
+    left: usize,
+    mask: [u8; 4],
+    offset: usize,
 }
 
 impl Conn {
@@ -125,6 +137,9 @@ impl Conn {
             },
             streams: StreamMap::default(),
             applied_paused: false,
+            upload: None,
+            read_chunk: RX_SIZE,
+            read_limit: RX_SIZE,
         });
         conn.link.sync_interest(cx);
         if conn.link.closing {
@@ -293,11 +308,20 @@ impl Conn {
             && total < MAX_READ_PER_EVENT
         {
             let mut rx = std::mem::take(&mut cx.rx);
-            let (n, drained) = if self.link.state == State::Http || self.link.need > rx.len() {
-                self.read_into_carry(cx, &mut rx)
+            let read_size = self.read_chunk;
+            if rx.len() < read_size {
+                rx.resize(read_size, 0);
+            }
+            let (n, drained) = if self.link.state == State::Http || self.link.need > read_size {
+                self.read_into_carry(cx, &mut rx[..read_size])
             } else {
-                self.read_into_scratch(cx, &mut rx)
+                self.read_into_scratch(cx, &mut rx[..read_size])
             };
+            if n != 0 && !drained {
+                self.read_chunk = (self.read_chunk * 2).min(self.read_limit);
+            } else if n != 0 && n < read_size / 4 && self.link.rbuf.is_empty() {
+                self.read_chunk = (self.read_chunk / 2).max(RX_SIZE);
+            }
             cx.rx = rx;
             total += n;
             if n == 0 || drained {
@@ -342,13 +366,14 @@ impl Conn {
         let mut data = std::mem::take(&mut self.link.rbuf);
         let consumed = if self.link.state == State::Http {
             self.process_http(cx, &mut data)
-        } else if data.len() >= self.link.need {
-            self.process_frames(cx, &mut data)
         } else {
-            0
+            self.process_frames(cx, &mut data)
         };
         if !self.link.closing {
             data.drain(..consumed);
+            if data.is_empty() && data.capacity() > self.read_chunk {
+                data = Vec::new();
+            }
             self.link.rbuf = data;
         }
         (n, n < want)
@@ -810,6 +835,32 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
         self.link.need = 0;
         let mut pos = 0;
         while !self.link.closing && !self.link.read_paused {
+            if let Some(mut upload) = self.upload.take() {
+                let n = upload.left.min(data.len() - pos);
+                if n == 0 {
+                    self.upload = Some(upload);
+                    break;
+                }
+                let payload = &mut data[pos..pos + n];
+                simd::unmask(payload, upload.mask, upload.offset);
+                upload.left -= n;
+                upload.offset = (upload.offset + n) & 3;
+                if let Some(s) = self.streams.get_mut(&upload.sid)
+                    && s.reg.token == upload.token
+                {
+                    Stats::add(&cx.sh.stats.bytes_in, n as u64);
+                    self.link.charge_bandwidth(cx, n);
+                    stream::on_data_part(&mut self.link, cx, s, payload, upload.left == 0);
+                    if s.state == SState::Closed {
+                        self.streams.remove(&upload.sid);
+                    }
+                }
+                pos += n;
+                if upload.left != 0 {
+                    self.upload = Some(upload);
+                }
+                continue;
+            }
             let rest = &mut data[pos..];
             let h = match ws::parse_header(rest) {
                 Ok(h) => h,
@@ -827,17 +878,139 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
                 self.ws_fail(cx, 1009);
                 break;
             }
+            self.read_limit = (h.payload_len as usize)
+                .saturating_mul(2)
+                .clamp(RX_SIZE, 2 << 20);
             let total = h.header_len + h.payload_len as usize;
             if rest.len() < total {
+                if h.fin
+                    && h.opcode == ws::opcode::BINARY
+                    && self.link.frag.is_none()
+                    && h.payload_len >= 128 << 10
+                    && rest.len() >= h.header_len + wisp::HEADER_LEN
+                    && (!self.link.is_v2 || self.link.handshake_done)
+                {
+                    let mut header: [u8; 5] =
+                        rest[h.header_len..h.header_len + 5].try_into().unwrap();
+                    simd::unmask(&mut header, h.mask, 0);
+                    let sid = u32::from_le_bytes(header[1..].try_into().unwrap());
+                    if header[0] == ptype::DATA
+                        && let Some(s) = self.streams.get(&sid)
+                        && stream::upload_stream(s)
+                    {
+                        self.link.packet_average =
+                            (self.link.packet_average * 7 + h.payload_len as usize - 5) / 8;
+                        self.upload = Some(Upload {
+                            sid,
+                            token: s.reg.token,
+                            left: h.payload_len as usize - 5,
+                            mask: h.mask,
+                            offset: 1,
+                        });
+                        pos += h.header_len + 5;
+                        continue;
+                    }
+                }
                 self.link.need = total;
                 break;
             }
-            let payload = &mut rest[h.header_len..total];
-            simd::unmask(payload, h.mask, 0);
-            self.handle_frame(cx, h.opcode, h.fin, payload);
+            simd::unmask(&mut rest[h.header_len..total], h.mask, 0);
+            if h.fin
+                && h.opcode == ws::opcode::BINARY
+                && self.link.frag.is_none()
+                && (!self.link.is_v2 || self.link.handshake_done)
+                && let Some(used) = self.upload_batch(cx, data, pos, total, h.header_len)
+            {
+                pos += used;
+                continue;
+            }
+            self.handle_frame(cx, h.opcode, h.fin, &data[pos + h.header_len..pos + total]);
             pos += total;
         }
         pos
+    }
+
+    fn upload_batch(
+        &mut self,
+        cx: &mut Ctx,
+        data: &mut [u8],
+        pos: usize,
+        total: usize,
+        header_len: usize,
+    ) -> Option<usize> {
+        if data.len() - pos - total < 6 + wisp::HEADER_LEN {
+            return None;
+        }
+        let first = wisp::parse(&data[pos + header_len..pos + total]).ok()?;
+        let sid = first.stream_id;
+        if first.ptype != ptype::DATA {
+            return None;
+        }
+        let s = self.streams.get(&sid)?;
+        if !stream::batchable(s) {
+            return None;
+        }
+        let max_packets = (s.remaining as usize).min(64);
+        let max_bytes = (cx.cfg().conn_queue_max as usize)
+            .saturating_sub(self.link.queued_out)
+            .min(cx.cfg().stream_queue_max as usize);
+        let mut bytes = first.payload.len();
+        let mut ranges = [(0, 0); 64];
+        ranges[0] = (pos + header_len + 5, pos + total);
+        let mut count = 1;
+        let mut end = pos + total;
+        while count < max_packets {
+            let Ok(h) = ws::parse_header(&data[end..]) else {
+                break;
+            };
+            if !h.masked
+                || !h.fin
+                || h.opcode != ws::opcode::BINARY
+                || h.payload_len < 5
+                || h.payload_len > u64::from(cx.cfg().max_message_size)
+            {
+                break;
+            }
+            let size = h.header_len + h.payload_len as usize;
+            if size > data.len() - end {
+                break;
+            }
+            let len = h.payload_len as usize - 5;
+            if bytes + len > max_bytes {
+                break;
+            }
+            let mut wh: [u8; 5] = data[end + h.header_len..end + h.header_len + 5]
+                .try_into()
+                .unwrap();
+            simd::unmask(&mut wh, h.mask, 0);
+            if wh[0] != ptype::DATA || u32::from_le_bytes(wh[1..].try_into().unwrap()) != sid {
+                break;
+            }
+            simd::unmask(&mut data[end + h.header_len..end + size], h.mask, 0);
+            ranges[count] = (end + h.header_len + 5, end + size);
+            bytes += len;
+            count += 1;
+            end += size;
+        }
+        if count == 1 {
+            return None;
+        }
+        for &(start, end) in &ranges[..count] {
+            let n = end - start;
+            Stats::add(&cx.sh.stats.bytes_in, n as u64);
+            self.link.charge_bandwidth(cx, n);
+            self.link.packet_average = (self.link.packet_average * 7 + n) / 8;
+        }
+        let parts: [std::io::IoSlice<'_>; 64] = std::array::from_fn(|i| {
+            let (start, end) = ranges[i];
+            std::io::IoSlice::new(&data[start..end])
+        });
+        let s = self.streams.get_mut(&sid).unwrap();
+        stream::on_data_batch(&mut self.link, cx, s, &parts[..count]);
+        if s.state == SState::Closed {
+            self.streams.remove(&sid);
+        }
+        Some(end - pos)
     }
 
     fn handle_frame(&mut self, cx: &mut Ctx, opcode: u8, fin: bool, payload: &[u8]) {

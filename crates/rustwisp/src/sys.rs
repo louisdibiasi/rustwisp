@@ -244,6 +244,18 @@ pub fn send_pair(fd: impl AsFd, a: &[u8], b: &[u8]) -> Res<usize> {
     )
 }
 
+pub(crate) fn send_vectored(fd: impl AsFd, parts: &[IoSlice<'_>]) -> Res<usize> {
+    if parts.len() == 1 {
+        return send(fd, &parts[0]);
+    }
+    rustix::net::sendmsg(
+        fd,
+        parts,
+        &mut SendAncillaryBuffer::default(),
+        SendFlags::NOSIGNAL | SendFlags::DONTWAIT,
+    )
+}
+
 // ------------------------------------------------------------------------------------- splice
 
 /// A non-blocking pipe whose capacity is raised to `size` where the kernel allows it.

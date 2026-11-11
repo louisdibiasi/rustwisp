@@ -818,6 +818,24 @@ fn flush_out(link: &mut Link, cx: &mut Ctx, s: &mut Stream) -> bool {
 /// DATA from the client for this stream. The payload is a slice of the worker's read buffer: try to
 /// send it straight to the remote and queue only what is left.
 pub(crate) fn on_data(link: &mut Link, cx: &mut Ctx, s: &mut Stream, data: &[u8]) {
+    on_data_part(link, cx, s, data, true);
+}
+
+pub(crate) fn upload_stream(s: &Stream) -> bool {
+    !s.udp && !is_terminal(s) && s.state != SState::Closed
+}
+
+pub(crate) fn batchable(s: &Stream) -> bool {
+    upload_stream(s) && s.state == SState::Open && s.out.is_empty()
+}
+
+pub(crate) fn on_data_part(
+    link: &mut Link,
+    cx: &mut Ctx,
+    s: &mut Stream,
+    data: &[u8],
+    final_part: bool,
+) {
     if s.state == SState::Closed {
         return;
     }
@@ -858,7 +876,7 @@ pub(crate) fn on_data(link: &mut Link, cx: &mut Ctx, s: &mut Stream, data: &[u8]
         }
     }
     // UDP queued entries (rare): a datagram that could not be sent immediately was dropped above.
-    if !s.udp {
+    if !s.udp && final_part {
         s.remaining = s.remaining.saturating_sub(1);
         if s.remaining == 0 {
             s.remaining = link.refill_window(cx);
@@ -867,6 +885,50 @@ pub(crate) fn on_data(link: &mut Link, cx: &mut Ctx, s: &mut Stream, data: &[u8]
             } else {
                 s.continue_due = true;
             }
+        }
+    }
+}
+
+pub(crate) fn on_data_batch(
+    link: &mut Link,
+    cx: &mut Ctx,
+    s: &mut Stream,
+    parts: &[std::io::IoSlice<'_>],
+) {
+    let total: usize = parts.iter().map(|p| p.len()).sum();
+    let sent = match sys::send_vectored(s.fd.as_ref().unwrap(), parts) {
+        Ok(n) => n,
+        Err(e) if sys::is_would_block(e) || e == Errno::INTR => 0,
+        Err(e) => {
+            close_stream(link, cx, s, map_errno(e), true);
+            return;
+        }
+    };
+    let rest = total - sent;
+    if rest > cx.cfg().stream_queue_max as usize {
+        close_stream(link, cx, s, close::THROTTLED, true);
+        return;
+    }
+    let mut skip = sent;
+    for part in parts {
+        if skip >= part.len() {
+            skip -= part.len();
+            continue;
+        }
+        s.out.push(&part[skip..]);
+        skip = 0;
+    }
+    if rest != 0 {
+        link.queue_add(cx, rest);
+        update_events(cx, s);
+    }
+    s.remaining -= parts.len() as u32;
+    if s.remaining == 0 {
+        s.remaining = link.refill_window(cx);
+        if s.out.is_empty() {
+            link.send_continue(cx, s.id, s.remaining);
+        } else {
+            s.continue_due = true;
         }
     }
 }

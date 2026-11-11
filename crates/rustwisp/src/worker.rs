@@ -423,6 +423,53 @@ mod tests {
     }
 
     #[test]
+    fn a_short_vectored_upload_queues_only_the_unsent_suffix() {
+        use std::io::Read;
+        let mut worker = worker();
+        let cx = &mut worker.cx;
+        let (token, _client) = connection(cx);
+        let Some(Entry::Conn(mut c)) = cx.slab.take(token) else {
+            panic!("missing connection")
+        };
+        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        rustix::net::sockopt::set_socket_recv_buffer_size(&target, 4096).unwrap();
+        crate::stream::open(
+            &mut c,
+            cx,
+            7,
+            1,
+            "127.0.0.1",
+            target.local_addr().unwrap().port(),
+        );
+        let (mut peer, _) = target.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        c.on_stream_event(cx, 7, sys::OUT);
+        let s = c.streams.get_mut(&7).unwrap();
+        assert_eq!(s.state, SState::Open);
+        rustix::net::sockopt::set_socket_send_buffer_size(s.fd.as_ref().unwrap(), 4096).unwrap();
+        let data: Vec<Vec<u8>> = (0..4).map(|i| vec![i; 65_536]).collect();
+        let parts: Vec<_> = data.iter().map(|p| std::io::IoSlice::new(p)).collect();
+        let remaining = s.remaining;
+        crate::stream::on_data_batch(&mut c.link, cx, s, &parts);
+        assert!(!s.out.is_empty() && s.out.len() < 4 * 65_536);
+        assert_eq!(c.link.queued_out, s.out.len());
+        assert_eq!(s.remaining, remaining - 4);
+        let reader = std::thread::spawn(move || {
+            let mut got = vec![0; 4 * 65_536];
+            peer.read_exact(&mut got).unwrap();
+            got
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while c.link.queued_out != 0 {
+            assert!(Instant::now() < deadline);
+            c.on_stream_event(cx, 7, sys::OUT);
+            std::thread::yield_now();
+        }
+        assert_eq!(reader.join().unwrap(), data.concat());
+        c.teardown(cx);
+    }
+
+    #[test]
     fn upload_budget_counts_pending_streams_and_releases_on_close() {
         let mut worker = worker();
         let cfg = &mut Arc::get_mut(&mut worker.cx.sh).unwrap().cfg;
