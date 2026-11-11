@@ -12,6 +12,7 @@ pub struct Stats {
     pub streams_active: AtomicU64,
     pub bytes_in: AtomicU64,
     pub bytes_out: AtomicU64,
+    worker_bytes: Vec<WorkerBytes>,
     pub refused_connection_rate: AtomicU64,
     pub refused_connection_limit: AtomicU64,
     pub refused_reputation: AtomicU64,
@@ -28,6 +29,13 @@ pub struct Stats {
     pub reputation_dests: AtomicU64,
 }
 
+#[repr(align(64))]
+#[derive(Debug, Default)]
+struct WorkerBytes {
+    input: AtomicU64,
+    output: AtomicU64,
+}
+
 impl Default for Stats {
     fn default() -> Self {
         Self::new()
@@ -36,6 +44,10 @@ impl Default for Stats {
 
 impl Stats {
     pub fn new() -> Self {
+        Self::with_workers(0)
+    }
+
+    pub(crate) fn with_workers(workers: usize) -> Self {
         let z = || AtomicU64::new(0);
         Stats {
             started: Instant::now(),
@@ -45,6 +57,7 @@ impl Stats {
             streams_active: z(),
             bytes_in: z(),
             bytes_out: z(),
+            worker_bytes: (0..workers).map(|_| WorkerBytes::default()).collect(),
             refused_connection_rate: z(),
             refused_connection_limit: z(),
             refused_reputation: z(),
@@ -74,6 +87,16 @@ impl Stats {
         c.fetch_sub(1, Ordering::Relaxed);
     }
 
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn add_worker_in(&self, worker: usize, n: u64) {
+        Self::add(&self.worker_bytes[worker].input, n);
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn add_worker_out(&self, worker: usize, n: u64) {
+        Self::add(&self.worker_bytes[worker].output, n);
+    }
+
     /// The `/stats` body.
     pub fn to_json(&self) -> String {
         let g = |c: &AtomicU64| c.load(Ordering::Relaxed);
@@ -92,8 +115,8 @@ impl Stats {
             g(&self.connections_active),
             g(&self.streams_total),
             g(&self.streams_active),
-            g(&self.bytes_in),
-            g(&self.bytes_out),
+            g(&self.bytes_in) + self.worker_bytes.iter().map(|w| g(&w.input)).sum::<u64>(),
+            g(&self.bytes_out) + self.worker_bytes.iter().map(|w| g(&w.output)).sum::<u64>(),
             g(&self.refused_connection_rate),
             g(&self.refused_connection_limit),
             g(&self.refused_reputation),
@@ -115,6 +138,27 @@ impl Stats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn traffic_from_concurrent_workers_is_summed_in_the_same_json_fields() {
+        let stats = Stats::with_workers(4);
+        std::thread::scope(|scope| {
+            for worker in 0..4 {
+                let stats = &stats;
+                scope.spawn(move || {
+                    for _ in 0..1000 {
+                        stats.add_worker_in(worker, 3);
+                        stats.add_worker_out(worker, 5);
+                    }
+                });
+            }
+        });
+        assert!(
+            stats
+                .to_json()
+                .contains("\"bytes\":{\"in\":12000,\"out\":20000}")
+        );
+    }
 
     #[test]
     fn json_has_every_field_the_c_server_has() {

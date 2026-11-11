@@ -530,7 +530,7 @@ fn connected(link: &mut Link, cx: &mut Ctx, s: &mut Stream) {
         sys::tune_tcp(fd, c.tcp_nodelay, c.tcp_quickack, c.socket_buffer_size);
     }
     s.read_armed = !link.reads_suspended();
-    if !update_events(cx, s) {
+    if s.out.is_empty() && !update_events(cx, s) {
         close_stream(link, cx, s, close::NETWORK_ERROR, true);
         return;
     }
@@ -794,7 +794,10 @@ fn flush_out(link: &mut Link, cx: &mut Ctx, s: &mut Stream) -> bool {
             }
             Err(Errno::INTR) => {}
             Err(e) if sys::is_would_block(e) => {
-                update_events(cx, s);
+                if !update_events(cx, s) {
+                    close_stream(link, cx, s, close::NETWORK_ERROR, true);
+                    return false;
+                }
                 return true;
             }
             Err(e) => {
@@ -804,7 +807,10 @@ fn flush_out(link: &mut Link, cx: &mut Ctx, s: &mut Stream) -> bool {
         }
     }
     s.out.shrink_if_idle(1 << 20);
-    update_events(cx, s);
+    if !update_events(cx, s) {
+        close_stream(link, cx, s, close::NETWORK_ERROR, true);
+        return false;
+    }
     if s.continue_due {
         s.continue_due = false;
         link.send_continue(cx, s.id, s.remaining);

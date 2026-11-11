@@ -41,7 +41,17 @@ pub fn epoll_add(ep: &OwnedFd, fd: impl AsFd, token: u64, flags: EventFlags) -> 
     epoll::add(ep, fd, EventData::new_u64(token), flags)
 }
 
+#[cfg(test)]
+std::thread_local! { static EPOLL_MOD_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+
+#[cfg(test)]
+pub(crate) fn epoll_mod_calls() -> u64 {
+    EPOLL_MOD_CALLS.with(|n| n.get())
+}
+
 pub fn epoll_mod(ep: &OwnedFd, fd: impl AsFd, token: u64, flags: EventFlags) -> Res<()> {
+    #[cfg(test)]
+    EPOLL_MOD_CALLS.with(|n| n.set(n.get() + 1));
     epoll::modify(ep, fd, EventData::new_u64(token), flags)
 }
 

@@ -1,6 +1,11 @@
 use super::*;
 
 #[test]
+fn polling_and_stdin_keys_are_accepted_from_text() {
+    cfg_from("busy-poll-us = 50\nstop-on-stdin-eof = on\n").unwrap();
+}
+
+#[test]
 fn credential_errors_and_debug_output_are_redacted() {
     let marker = "credential-marker-7319";
     for value in [
@@ -99,6 +104,19 @@ fn upload_queue_options_accept_their_full_unsigned_ranges() {
     c.set("client-recv-buffer", "0").unwrap();
     c.set("client-recv-buffer", "1073741824").unwrap();
     assert!(c.set("client-recv-buffer", "1073741825").is_err());
+}
+
+#[test]
+fn optional_polling_and_parent_lifetime_options_are_bounded() {
+    let mut c = Config::default();
+    assert_eq!(c.busy_poll_us, 0);
+    assert!(!c.stop_on_stdin_eof);
+    c.set("busy-poll-us", "10000").unwrap();
+    assert!(c.set("busy-poll-us", "10001").is_err());
+    assert!(c.set("busy-poll-us", "-1").is_err());
+    c.set("stop-on-stdin-eof", "on").unwrap();
+    assert!(c.stop_on_stdin_eof);
+    assert!(c.set("stop-on-stdin-eof", "maybe").is_err());
 }
 
 #[test]

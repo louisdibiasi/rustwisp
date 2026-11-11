@@ -212,7 +212,7 @@ impl Server {
         let shared = Arc::new(Shared {
             client_rcvbuf: crate::sys::client_recv_buffer(&cfg),
             window: ingress_window(&cfg),
-            stats: Stats::new(),
+            stats: Stats::with_workers(count),
             webclient,
             splice,
             resolver,

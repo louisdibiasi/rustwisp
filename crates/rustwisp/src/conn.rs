@@ -401,9 +401,14 @@ impl Conn {
     // -------------------------------------------------------------------------------- HTTP
 
     fn http_reply(&mut self, cx: &Ctx, status: u16, reason: &str, ctype: &str, body: &[u8]) {
+        let retry = if status == 429 {
+            format!("Retry-After: {}\r\n", cx.cfg().connection_window_s)
+        } else {
+            String::new()
+        };
         let head = format!(
             "HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\n\
-Cache-Control: no-store\r\nConnection: close\r\n\r\n",
+Cache-Control: no-store\r\n{retry}Connection: close\r\n\r\n",
             body.len()
         );
         self.link.wbuf.push(head.as_bytes());
@@ -785,7 +790,7 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
                 let Some(s) = self.streams.get_mut(&p.stream_id) else {
                     return; // raced with our CLOSE
                 };
-                Stats::add(&cx.sh.stats.bytes_in, p.payload.len() as u64);
+                cx.sh.stats.add_worker_in(cx.index, p.payload.len() as u64);
                 self.link.packet_average = (self.link.packet_average * 7 + p.payload.len()) / 8;
                 self.link.charge_bandwidth(cx, p.payload.len());
                 stream::on_data(&mut self.link, cx, s, p.payload);
@@ -848,7 +853,7 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
                 if let Some(s) = self.streams.get_mut(&upload.sid)
                     && s.reg.token == upload.token
                 {
-                    Stats::add(&cx.sh.stats.bytes_in, n as u64);
+                    cx.sh.stats.add_worker_in(cx.index, n as u64);
                     self.link.charge_bandwidth(cx, n);
                     stream::on_data_part(&mut self.link, cx, s, payload, upload.left == 0);
                     if s.state == SState::Closed {
@@ -997,7 +1002,7 @@ Cache-Control: no-store\r\nConnection: close\r\n\r\n",
         }
         for &(start, end) in &ranges[..count] {
             let n = end - start;
-            Stats::add(&cx.sh.stats.bytes_in, n as u64);
+            cx.sh.stats.add_worker_in(cx.index, n as u64);
             self.link.charge_bandwidth(cx, n);
             self.link.packet_average = (self.link.packet_average * 7 + n) / 8;
         }

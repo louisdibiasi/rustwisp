@@ -366,7 +366,7 @@ impl Link {
                 break;
             }
         }
-        Stats::add(&cx.sh.stats.bytes_out, data.len() as u64);
+        cx.sh.stats.add_worker_out(cx.index, data.len() as u64);
         self.charge_bandwidth(cx, data.len());
     }
 
@@ -440,7 +440,7 @@ impl Link {
             self.closing = true;
             return;
         }
-        Stats::add(&cx.sh.stats.bytes_out, n as u64);
+        cx.sh.stats.add_worker_out(cx.index, n as u64);
         self.charge_bandwidth(cx, n);
         if !self.wbuf.is_empty() {
             self.flush(cx);

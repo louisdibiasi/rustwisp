@@ -120,7 +120,7 @@ fn flood(f: impl FnOnce(&mut FloodConfig)) -> FloodConfig {
 }
 
 /// The status line of a WebSocket upgrade attempt with optional extra headers.
-fn upgrade_status(port: u16, extra: &str) -> String {
+fn upgrade_response(port: u16, extra: &str) -> String {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(TIMEOUT)).unwrap();
     write!(
@@ -129,9 +129,21 @@ fn upgrade_status(port: u16, extra: &str) -> String {
 Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{extra}\r\n"
     )
     .unwrap();
-    let mut buf = [0u8; 256];
-    let n = s.read(&mut buf).unwrap();
-    String::from_utf8_lossy(&buf[..n])
+    let mut response = Vec::new();
+    let mut buf = [0; 1024];
+    loop {
+        let n = s.read(&mut buf).unwrap();
+        assert!(n > 0, "response ended before its headers");
+        response.extend_from_slice(&buf[..n]);
+        if let Some(end) = response.windows(4).position(|w| w == b"\r\n\r\n") {
+            return String::from_utf8_lossy(&response[..end + 4]).into_owned();
+        }
+        assert!(response.len() < 8192, "response headers too large");
+    }
+}
+
+fn upgrade_status(port: u16, extra: &str) -> String {
+    upgrade_response(port, extra)
         .lines()
         .next()
         .unwrap_or("")
@@ -164,7 +176,9 @@ fn per_ip_connection_rate_returns_429() {
     let h = start(cfg);
     assert!(upgrade_status(h.port(), "").contains("101"));
     assert!(upgrade_status(h.port(), "").contains("101"));
-    assert!(upgrade_status(h.port(), "").contains("429"));
+    let response = upgrade_response(h.port(), "");
+    assert!(response.contains("429"));
+    assert!(response.contains("\r\nRetry-After: 10\r\n"));
     h.stop_and_join();
 }
 

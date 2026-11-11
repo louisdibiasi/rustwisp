@@ -56,6 +56,7 @@ fn run() -> i32 {
         }
     };
     rustwisp::log::set_level(cfg.log_level);
+    let stop_on_stdin_eof = cfg.stop_on_stdin_eof;
     let server = match Server::bind(cfg) {
         Ok(s) => s,
         Err(e) => {
@@ -84,6 +85,42 @@ fn run() -> i32 {
             return 1;
         }
     };
+    if stop_on_stdin_eof {
+        let wake = match stop_fd.try_clone() {
+            Ok(fd) => fd,
+            Err(e) => {
+                rustwisp::log::error("server", format_args!("cannot watch stdin: {e}"));
+                handle.stop_and_join();
+                return 1;
+            }
+        };
+        if let Err(e) = std::thread::Builder::new()
+            .name("stdin".into())
+            .spawn(move || {
+                use std::io::Read;
+                let mut input = std::io::stdin().lock();
+                let mut bytes = [0; 256];
+                loop {
+                    match input.read(&mut bytes) {
+                        Ok(0) => {
+                            sys::wake(&wake);
+                            return;
+                        }
+                        Ok(_) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(e) => {
+                            rustwisp::log::warn("server", format_args!("cannot watch stdin: {e}"));
+                            return;
+                        }
+                    }
+                }
+            })
+        {
+            rustwisp::log::error("server", format_args!("cannot watch stdin: {e}"));
+            handle.stop_and_join();
+            return 1;
+        }
+    }
     // Block until a signal writes to the eventfd.
     let mut buf = [0u8; 8];
     loop {

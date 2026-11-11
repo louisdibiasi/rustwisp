@@ -34,6 +34,11 @@ const PIPE_SIZE: usize = 1 << 20;
 const MAX_EVENTS: usize = 1024;
 const MAX_TIMERS: usize = 262_144;
 
+fn busy_deadline(now: Instant, micros: u32, timer: Option<Instant>) -> Instant {
+    let until = now + Duration::from_micros(u64::from(micros));
+    timer.map_or(until, |at| at.min(until))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpliceMode {
     Off,
@@ -254,15 +259,22 @@ impl Worker {
         }
         let mut scratch: Vec<Event> = Vec::with_capacity(MAX_EVENTS);
         let mut events: Vec<(u64, EventFlags)> = Vec::with_capacity(MAX_EVENTS);
+        let busy_poll = self.cx.cfg().busy_poll_us != 0;
+        let mut was_busy = false;
         while !self.cx.sh.stop.load(Ordering::Acquire) {
-            let timeout = self.next_timeout();
-            if let Err(e) = sys::epoll_wait(&self.cx.ep, &mut scratch, &mut events, timeout) {
+            let waited = if busy_poll {
+                self.wait_events(&mut scratch, &mut events, was_busy)
+            } else {
+                sys::epoll_wait(&self.cx.ep, &mut scratch, &mut events, self.next_timeout())
+            };
+            if let Err(e) = waited {
                 crate::log::error(
                     "worker",
                     format_args!("worker {}: epoll_wait: {e}", self.cx.index),
                 );
                 break;
             }
+            was_busy = busy_poll && !events.is_empty();
             for &(token, flags) in &events {
                 self.dispatch(token, flags);
             }
@@ -275,6 +287,39 @@ impl Worker {
         let now = Instant::now();
         // Round up to a whole millisecond so a timer due in 200 us does not spin.
         Some(next.saturating_duration_since(now) + Duration::from_micros(500))
+    }
+
+    fn wait_events(
+        &self,
+        scratch: &mut Vec<Event>,
+        events: &mut Vec<(u64, EventFlags)>,
+        was_busy: bool,
+    ) -> Result<(), sys::Errno> {
+        if was_busy && self.cx.cfg().busy_poll_us != 0 {
+            let until = busy_deadline(
+                Instant::now(),
+                self.cx.cfg().busy_poll_us,
+                self.cx.timers.peek().map(|t| t.0.at),
+            );
+            loop {
+                sys::epoll_wait(&self.cx.ep, scratch, events, Some(Duration::ZERO))?;
+                if !events.is_empty() || self.cx.sh.stop.load(Ordering::Acquire) {
+                    return Ok(());
+                }
+                if Instant::now() >= until {
+                    break;
+                }
+            }
+            if self
+                .cx
+                .timers
+                .peek()
+                .is_some_and(|t| t.0.at <= Instant::now())
+            {
+                return Ok(());
+            }
+        }
+        sys::epoll_wait(&self.cx.ep, scratch, events, self.next_timeout())
     }
 
     fn dispatch(&mut self, token: u64, flags: EventFlags) {
@@ -500,6 +545,62 @@ mod tests {
         c.teardown(cx);
         assert_eq!(c.link.queued_out, 0);
         assert_eq!(c.link.live_streams, 0);
+    }
+
+    #[test]
+    fn queued_upload_needs_one_interest_change_when_the_dial_completes() {
+        use std::io::Read;
+        let mut worker = worker();
+        let cx = &mut worker.cx;
+        let (token, _client) = connection(cx);
+        let Some(Entry::Conn(mut c)) = cx.slab.take(token) else {
+            panic!("missing connection")
+        };
+        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        crate::stream::open(
+            &mut c,
+            cx,
+            7,
+            1,
+            "127.0.0.1",
+            target.local_addr().unwrap().port(),
+        );
+        let (mut remote, _) = target.accept().unwrap();
+        remote
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        assert_eq!(c.streams[&7].state, SState::Connecting);
+        crate::stream::on_data(
+            &mut c.link,
+            cx,
+            c.streams.get_mut(&7).unwrap(),
+            b"queued upload",
+        );
+        let before = sys::epoll_mod_calls();
+        c.on_stream_event(cx, 7, sys::OUT);
+        assert_eq!(sys::epoll_mod_calls() - before, 1);
+        let mut bytes = [0; 13];
+        remote.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"queued upload");
+        assert!(c.streams[&7].out.is_empty());
+        assert_eq!(c.link.queued_out, 0);
+        c.teardown(cx);
+    }
+
+    #[test]
+    fn polling_budget_never_outlasts_the_next_timer() {
+        let now = Instant::now();
+        let timer = now + Duration::from_micros(10);
+        assert_eq!(busy_deadline(now, 50, Some(timer)), timer);
+        assert_eq!(
+            busy_deadline(now, 5, Some(timer)),
+            now + Duration::from_micros(5)
+        );
+        assert_eq!(
+            busy_deadline(now, 50, None),
+            now + Duration::from_micros(50)
+        );
+        assert_eq!(busy_deadline(now, 0, None), now);
     }
 
     #[test]
