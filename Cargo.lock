@@ -234,7 +234,7 @@ dependencies = [
 
 [[package]]
 name = "rustwisp"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "libc",
  "pwhash",
@@ -245,25 +245,25 @@ dependencies = [
 
 [[package]]
 name = "rustwisp-bench"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "rustwisp-client",
 ]
 
 [[package]]
 name = "rustwisp-client"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "rustwisp-proto",
 ]
 
 [[package]]
 name = "rustwisp-config"
-version = "0.1.2"
+version = "0.2.0"
 
 [[package]]
 name = "rustwisp-proto"
-version = "0.1.2"
+version = "0.2.0"
 
 [[package]]
 name = "sha-1"

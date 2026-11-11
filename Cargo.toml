@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/rustwisp-proto", "crates/rustwisp-config", "crates/rustwisp", "crates/rustwisp-client", "crates/rustwisp-bench"]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 license = "ISC"
